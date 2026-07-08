@@ -409,7 +409,7 @@ class _ChoicePage extends StatelessWidget {
         const Color(0xffe9f7ef),
       ),
       _ChoiceCard(
-        '支出管理',
+        '収支管理',
         '支出や収入を正負の金額で記録します。',
         Icons.payments_outlined,
         () => onGo(AppPage.expense),
@@ -585,7 +585,7 @@ class _ExpensePage extends StatelessWidget {
   Widget build(BuildContext context) {
     const kinds = ['食費', '交通費', '勉強', '遊び', '日用品', '収入', 'その他'];
     return _FormShell(
-      title: '支出管理',
+      title: '収支管理',
       children: [
         TextField(
           controller: amountController,
@@ -926,11 +926,11 @@ class _MoneyPanel extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(8, 0, 2, 0),
         children: [
-          FilledButton(onPressed: onExpense, child: const Text('支出管理')),
+          FilledButton(onPressed: onExpense, child: const Text('収支管理')),
           const SizedBox(height: 10),
           OutlinedButton(onPressed: onTask, child: const Text('タスク追加')),
           const SizedBox(height: 12),
-          _StatBox(label: '支出合計', value: '${total.toString()}円'),
+          _StatBox(label: '収支合計', value: '${total.toString()}円'),
           const SizedBox(height: 10),
           _StatBox(label: 'Poiされた数', value: '$poiCount'),
           const SizedBox(height: 16),
@@ -940,7 +940,7 @@ class _MoneyPanel extends StatelessWidget {
               children: [
                 const Expanded(
                   child: Text(
-                    '最近の支出',
+                    '最近の収支',
                     style: TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w800,
@@ -950,7 +950,7 @@ class _MoneyPanel extends StatelessWidget {
                 ),
                 OutlinedButton(
                   onPressed: onExpenseHistory,
-                  child: const Text('支出履歴'),
+                  child: const Text('収支履歴'),
                 ),
               ],
             ),
@@ -958,7 +958,7 @@ class _MoneyPanel extends StatelessWidget {
           const SizedBox(height: 10),
           if (expenses.isEmpty)
             const Text(
-              '支出管理から記録できます。',
+              '収支管理から記録できます。',
               style: TextStyle(color: Color(0xff6b7880)),
             )
           else
@@ -1022,7 +1022,7 @@ class _ExpenseHistoryPage extends StatelessWidget {
         children: [
           Expanded(
             child: _Panel(
-              title: '支出履歴',
+              title: '収支履歴',
               child: _ExpenseHistoryList(expenses: expenses),
             ),
           ),
@@ -1039,7 +1039,7 @@ class _ExpenseHistoryPage extends StatelessWidget {
             runSpacing: 10,
             children: [
               OutlinedButton(onPressed: onHome, child: const Text('メイン画面')),
-              FilledButton(onPressed: onExpense, child: const Text('支出管理')),
+              FilledButton(onPressed: onExpense, child: const Text('収支管理')),
             ],
           ),
         ],
@@ -1056,7 +1056,7 @@ class _ExpenseHistoryList extends StatelessWidget {
   Widget build(BuildContext context) {
     if (expenses.isEmpty) {
       return const Text(
-        'まだ支出履歴がありません。',
+        'まだ収支履歴がありません。',
         style: TextStyle(color: Color(0xff6b7880)),
       );
     }
@@ -1122,7 +1122,7 @@ class _ExpenseAnalysisPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     if (summaries.isEmpty) {
       return const Text(
-        '支出を記録すると月別の集計が表示されます。',
+        '収支を記録すると月別の集計が表示されます。',
         style: TextStyle(color: Color(0xff6b7880)),
       );
     }
@@ -1132,7 +1132,7 @@ class _ExpenseAnalysisPanel extends StatelessWidget {
         ...summaries.map((summary) => _MonthlySummaryCard(summary: summary)),
         const SizedBox(height: 14),
         const Text(
-          '月別支出グラフ',
+          '月別収支グラフ',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 8),
