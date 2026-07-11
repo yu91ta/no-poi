@@ -128,9 +128,17 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
     );
   }
 
+  // タスク入力欄にこの文字列を入力して追加すると、保存データの初期化を確認する。
+  static const _resetCommand = 'asdfghjkl;:]';
+
   Future<void> _addTask() async {
     final text = _taskController.text.trim();
     if (text.isEmpty) return;
+    if (text == _resetCommand) {
+      _taskController.clear();
+      await _confirmAndResetAllData();
+      return;
+    }
     final task = NopoiTask(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       text: text,
@@ -150,6 +158,56 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('タスクを追加しました')));
+    }
+  }
+
+  Future<void> _confirmAndResetAllData() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('データを初期化しますか？'),
+        content: const Text(
+          'タスク・Poiリスト・完了済みタスク・収支の記録をすべて削除します。\nこの操作は取り消せません。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xffc4565d),
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('初期化する'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await _resetAllData();
+    }
+  }
+
+  Future<void> _resetAllData() async {
+    // 通知が残らないよう、タスクに紐づく予定済み通知をすべてキャンセルする。
+    for (final task in _tasks) {
+      await NotificationService.instance.cancelTask(task);
+    }
+    setState(() {
+      _tasks = [];
+      _poiTasks = [];
+      _doneTasks = [];
+      _expenses = [];
+      _checkedTaskIds.clear();
+      _notifyAt = null;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_storageKey);
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('データを初期化しました')));
     }
   }
 
@@ -181,8 +239,10 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
   }
 
   Future<void> _addExpense() async {
-    final amount = int.tryParse(_amountController.text.trim());
-    if (amount == null || amount == 0) return;
+    final rawAmount = int.tryParse(_amountController.text.trim());
+    if (rawAmount == null || rawAmount == 0) return;
+    // 金額は常に絶対値で保存する。収入/支出の区別は kind（内容）で判定する。
+    final amount = rawAmount.abs();
     final kind =
         _expenseKind == 'その他' && _otherExpenseController.text.trim().isNotEmpty
         ? _otherExpenseController.text.trim()
@@ -589,9 +649,10 @@ class _ExpensePage extends StatelessWidget {
       children: [
         TextField(
           controller: amountController,
-          keyboardType: TextInputType.number,
+          keyboardType: const TextInputType.numberWithOptions(signed: true),
           decoration: const InputDecoration(
             labelText: '金額',
+            helperText: '金額は正の数で入力してください',
             border: OutlineInputBorder(),
           ),
         ),
@@ -920,7 +981,18 @@ class _MoneyPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final total = expenses.fold<int>(0, (sum, item) => sum + item.amount);
+    final incomeTotal = expenses
+        .where((item) => item.isIncome)
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+    final expenseTotal = expenses
+        .where((item) => !item.isIncome)
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+    final balance = incomeTotal - expenseTotal;
+    final balanceColor = balance > 0
+        ? const Color(0xff278554)
+        : balance < 0
+        ? const Color(0xffc4565d)
+        : const Color(0xff6b7880);
     return _Panel(
       title: '',
       child: ListView(
@@ -930,7 +1002,31 @@ class _MoneyPanel extends StatelessWidget {
           const SizedBox(height: 10),
           OutlinedButton(onPressed: onTask, child: const Text('タスク追加')),
           const SizedBox(height: 12),
-          _StatBox(label: '収支合計', value: '${total.toString()}円'),
+          _StatBox(
+            label: '残高（収支）',
+            value: formatSignedAmount(balance),
+            valueColor: balanceColor,
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _StatBox(
+                  label: '収入合計',
+                  value: '$incomeTotal円',
+                  valueColor: const Color(0xff278554),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _StatBox(
+                  label: '支出合計',
+                  value: '$expenseTotal円',
+                  valueColor: const Color(0xffc4565d),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 10),
           _StatBox(label: 'Poiされた数', value: '$poiCount'),
           const SizedBox(height: 16),
@@ -977,10 +1073,10 @@ class _MoneyPanel extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '${item.amount}円',
+                          '${item.isIncome ? '+' : '-'}${item.amount.abs()}円',
                           style: TextStyle(
                             fontWeight: FontWeight.w900,
-                            color: item.amount >= 0
+                            color: item.isIncome
                                 ? const Color(0xff278554)
                                 : const Color(0xffc4565d),
                           ),
@@ -1135,6 +1231,8 @@ class _ExpenseAnalysisPanel extends StatelessWidget {
           '月別収支グラフ',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
         ),
+        const SizedBox(height: 6),
+        const _TrendLegend(),
         const SizedBox(height: 8),
         SizedBox(
           height: 150,
@@ -1154,11 +1252,11 @@ class _MonthlySummaryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final changeColor = summary.delta == 0
-        ? const Color(0xff6b7880)
-        : summary.delta > 0
+    final balanceColor = summary.balance > 0
+        ? const Color(0xff278554)
+        : summary.balance < 0
         ? const Color(0xffc4565d)
-        : const Color(0xff278554);
+        : const Color(0xff6b7880);
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
@@ -1182,29 +1280,105 @@ class _MonthlySummaryCard extends StatelessWidget {
                 ),
               ),
               Text(
-                '${summary.total}円',
-                style: const TextStyle(fontWeight: FontWeight.w900),
+                '収支 ${formatSignedAmount(summary.balance)}',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  color: balanceColor,
+                ),
               ),
             ],
           ),
+          const SizedBox(height: 10),
+          _SummaryRow(
+            label: '収入',
+            total: summary.incomeTotal,
+            delta: summary.incomeDelta,
+            percentChange: summary.incomePercentChange,
+            color: const Color(0xff278554),
+          ),
           const SizedBox(height: 6),
-          Text(
-            '前月比 ${formatSignedAmount(summary.delta)} / ${formatPercent(summary.percentChange)}',
-            style: TextStyle(color: changeColor, fontWeight: FontWeight.w700),
+          _SummaryRow(
+            label: '支出',
+            total: summary.expenseTotal,
+            delta: summary.expenseDelta,
+            percentChange: summary.expensePercentChange,
+            color: const Color(0xffc4565d),
+            invertDeltaColor: true,
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: summary.categoryTotals.entries
-                .map(
-                  (entry) =>
-                      _CategoryChip(label: entry.key, amount: entry.value),
-                )
-                .toList(),
+          const SizedBox(height: 6),
+          _SummaryRow(
+            label: '収支',
+            total: summary.balance,
+            delta: summary.balanceDelta,
+            percentChange: summary.balancePercentChange,
+            color: balanceColor,
           ),
+          if (summary.categoryTotals.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: summary.categoryTotals.entries
+                  .map(
+                    (entry) =>
+                        _CategoryChip(label: entry.key, amount: entry.value),
+                  )
+                  .toList(),
+            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+class _SummaryRow extends StatelessWidget {
+  const _SummaryRow({
+    required this.label,
+    required this.total,
+    required this.delta,
+    required this.percentChange,
+    required this.color,
+    this.invertDeltaColor = false,
+  });
+
+  final String label;
+  final int total;
+  final int delta;
+  final double? percentChange;
+  final Color color;
+  final bool invertDeltaColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final rawUp = delta > 0;
+    final rawDown = delta < 0;
+    final deltaColor = delta == 0
+        ? const Color(0xff6b7880)
+        : (invertDeltaColor ? rawDown : rawUp)
+        ? const Color(0xff278554)
+        : const Color(0xffc4565d);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 42,
+          child: Text(
+            label,
+            style: TextStyle(fontWeight: FontWeight.w700, color: color),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            '$total円',
+            style: TextStyle(fontWeight: FontWeight.w800, color: color),
+          ),
+        ),
+        Text(
+          '前月比 ${formatSignedAmount(delta)} / ${formatPercent(percentChange)}',
+          style: TextStyle(fontSize: 12, color: deltaColor),
+        ),
+      ],
     );
   }
 }
@@ -1215,32 +1389,45 @@ class _CategoryChip extends StatelessWidget {
   final int amount;
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0xffedf7f1),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xffcfe2d5)),
-      ),
-      child: Text('$label $amount円'),
-    );
-  }
+Widget build(BuildContext context) {
+  return const SizedBox();
+}
 }
 
 class MonthlyExpenseSummary {
   MonthlyExpenseSummary({
     required this.month,
-    required this.total,
-    required this.delta,
-    required this.percentChange,
+    required this.incomeTotal,
+    required this.expenseTotal,
+    required this.balance,
+    required this.incomeDelta,
+    required this.expenseDelta,
+    required this.balanceDelta,
+    required this.incomePercentChange,
+    required this.expensePercentChange,
+    required this.balancePercentChange,
     required this.categoryTotals,
   });
 
   final DateTime month;
-  final int total;
-  final int delta;
-  final double? percentChange;
+
+  /// その月の収入合計。
+  final int incomeTotal;
+
+  /// その月の支出合計。
+  final int expenseTotal;
+
+  /// その月の収支（収入 - 支出）。
+  final int balance;
+
+  final int incomeDelta;
+  final int expenseDelta;
+  final int balanceDelta;
+
+  final double? incomePercentChange;
+  final double? expensePercentChange;
+  final double? balancePercentChange;
+
   final Map<String, int> categoryTotals;
 
   String get label => '${month.year}/${month.month.toString().padLeft(2, '0')}';
@@ -1252,41 +1439,85 @@ class ExpenseTrendPainter extends CustomPainter {
 
   final List<MonthlyExpenseSummary> summaries;
 
+  static const incomeColor = Color(0xff278554);
+  static const expenseColor = Color(0xffc4565d);
+  static const balanceColor = Color(0xff3d6fb4);
+
   @override
   void paint(Canvas canvas, Size size) {
     if (summaries.isEmpty) return;
     final axis = Paint()
       ..color = const Color(0xffd8e1e5)
       ..strokeWidth = 1.5;
-    final bar = Paint()..color = const Color(0xff75b98b);
+    final incomeBar = Paint()..color = incomeColor;
+    final expenseBar = Paint()..color = expenseColor;
+    final balanceLine = Paint()
+      ..color = balanceColor
+      ..strokeWidth = 2.2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final balanceDot = Paint()..color = balanceColor;
     final textPainter = TextPainter(
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
     );
-    const bottom = 24.0;
+    const bottom = 18.0;
     const top = 8.0;
     final chartHeight = size.height - bottom - top;
+
+    // 収入は上向き、支出は下向きに伸ばすため、中央をゼロラインとして
+    // 上半分に収入、下半分に支出を描画する。
     final maxTotal = summaries
-        .map((summary) => summary.total)
+        .expand((s) => [s.incomeTotal, s.expenseTotal])
         .fold<int>(0, max)
         .clamp(1, 1 << 31);
-    canvas.drawLine(
-      Offset(0, size.height - bottom),
-      Offset(size.width, size.height - bottom),
-      axis,
-    );
+
+    final zeroY = top + chartHeight * 0.5;
+    final halfHeight = chartHeight * 0.5;
+
+    canvas.drawLine(Offset(0, zeroY), Offset(size.width, zeroY), axis);
+
     final slot = size.width / summaries.length;
+    final balancePoints = <Offset>[];
+
     for (var i = 0; i < summaries.length; i++) {
       final summary = summaries[i];
-      final height = chartHeight * (summary.total / maxTotal);
-      final left = slot * i + slot * .22;
-      final width = slot * .56;
-      final topY = size.height - bottom - height;
-      final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(left, topY, width, height),
-        const Radius.circular(5),
+      final groupLeft = slot * i + slot * .12;
+      final groupWidth = slot * .76;
+      final barWidth = groupWidth * .44;
+
+      // 収入バー：ゼロラインから上向きに伸びる。
+      final incomeHeight = halfHeight * (summary.incomeTotal / maxTotal);
+      final incomeRect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          groupLeft,
+          zeroY - incomeHeight,
+          barWidth,
+          incomeHeight,
+        ),
+        const Radius.circular(4),
       );
-      canvas.drawRRect(rect, bar);
+      canvas.drawRRect(incomeRect, incomeBar);
+
+      // 支出バー：ゼロラインから下向きに伸びる。
+      final expenseHeight = halfHeight * (summary.expenseTotal / maxTotal);
+      final expenseRect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          groupLeft + barWidth + groupWidth * .06,
+          zeroY,
+          barWidth,
+          expenseHeight,
+        ),
+        const Radius.circular(4),
+      );
+      canvas.drawRRect(expenseRect, expenseBar);
+
+      // 収支の折れ線は、プラスなら上向き、マイナスなら下向きに合わせて表示する。
+      final balanceHeight = halfHeight * (summary.balance / maxTotal);
+      final balanceX = slot * i + slot * .5;
+      final balanceY = zeroY - balanceHeight;
+      balancePoints.add(Offset(balanceX, balanceY));
+
       textPainter.text = TextSpan(
         text: '${summary.month.month}月',
         style: const TextStyle(fontSize: 10, color: Color(0xff6b7880)),
@@ -1294,14 +1525,63 @@ class ExpenseTrendPainter extends CustomPainter {
       textPainter.layout(maxWidth: slot);
       textPainter.paint(
         canvas,
-        Offset(slot * i + (slot - textPainter.width) / 2, size.height - 18),
+        Offset(slot * i + (slot - textPainter.width) / 2, size.height - 14),
       );
+    }
+
+    for (var i = 0; i < balancePoints.length - 1; i++) {
+      canvas.drawLine(balancePoints[i], balancePoints[i + 1], balanceLine);
+    }
+    for (final point in balancePoints) {
+      canvas.drawCircle(point, 3, balanceDot);
     }
   }
 
   @override
   bool shouldRepaint(ExpenseTrendPainter oldDelegate) =>
       oldDelegate.summaries != summaries;
+}
+
+class _TrendLegend extends StatelessWidget {
+  const _TrendLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Wrap(
+      spacing: 14,
+      runSpacing: 6,
+      children: [
+        _LegendItem(color: ExpenseTrendPainter.incomeColor, label: '収入'),
+        _LegendItem(color: ExpenseTrendPainter.expenseColor, label: '支出'),
+        _LegendItem(color: ExpenseTrendPainter.balanceColor, label: '収支'),
+      ],
+    );
+  }
+}
+
+class _LegendItem extends StatelessWidget {
+  const _LegendItem({required this.color, required this.label});
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 12, color: Color(0xff6b7880)),
+        ),
+      ],
+    );
+  }
 }
 
 class _PoiPage extends StatelessWidget {
@@ -1446,9 +1726,10 @@ class _Panel extends StatelessWidget {
 }
 
 class _StatBox extends StatelessWidget {
-  const _StatBox({required this.label, required this.value});
+  const _StatBox({required this.label, required this.value, this.valueColor});
   final String label;
   final String value;
+  final Color? valueColor;
 
   @override
   Widget build(BuildContext context) {
@@ -1466,7 +1747,11 @@ class _StatBox extends StatelessWidget {
           Text(label, style: const TextStyle(color: Color(0xff6b7880))),
           Text(
             value,
-            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+              color: valueColor,
+            ),
           ),
         ],
       ),
@@ -1762,6 +2047,11 @@ class ExpenseItem {
   final String kind;
   final DateTime createdAt;
 
+  bool get isIncome => kind == '収入';
+
+  /// 収入なら正の値、支出なら負の値として扱った金額（収支計算用）。
+  int get signedAmount => isIncome ? amount.abs() : -amount.abs();
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'amount': amount,
@@ -1783,48 +2073,83 @@ class ExpenseItem {
 List<MonthlyExpenseSummary> buildMonthlyExpenseSummaries(
   List<ExpenseItem> expenses,
 ) {
-  final grouped = <DateTime, Map<String, int>>{};
+  final groupedExpenseCategories = <DateTime, Map<String, int>>{};
+  final groupedIncomeTotal = <DateTime, int>{};
+  final groupedExpenseTotal = <DateTime, int>{};
+
   for (final item in expenses) {
-    final amount = spendingAmount(item);
-    if (amount == 0) continue;
     final month = DateTime(item.createdAt.year, item.createdAt.month);
-    final categories = grouped.putIfAbsent(month, () => <String, int>{});
-    categories[item.kind] = (categories[item.kind] ?? 0) + amount;
+    if (item.isIncome) {
+      final amount = item.amount.abs();
+      if (amount == 0) continue;
+      groupedIncomeTotal[month] = (groupedIncomeTotal[month] ?? 0) + amount;
+    } else {
+      final amount = spendingAmount(item);
+      if (amount == 0) continue;
+      groupedExpenseTotal[month] = (groupedExpenseTotal[month] ?? 0) + amount;
+      final categories = groupedExpenseCategories.putIfAbsent(
+        month,
+        () => <String, int>{},
+      );
+      categories[item.kind] = (categories[item.kind] ?? 0) + amount;
+    }
   }
 
-  final months = grouped.keys.toList()..sort();
+  final months =
+      <DateTime>{
+        ...groupedIncomeTotal.keys,
+        ...groupedExpenseTotal.keys,
+      }.toList()..sort();
+
   final summaries = <MonthlyExpenseSummary>[];
-  var previousTotal = 0;
+  var previousIncome = 0;
+  var previousExpense = 0;
+  var previousBalance = 0;
   for (final month in months) {
-    final categoryTotals = grouped[month]!;
+    final incomeTotal = groupedIncomeTotal[month] ?? 0;
+    final expenseTotal = groupedExpenseTotal[month] ?? 0;
+    final balance = incomeTotal - expenseTotal;
+    final categoryTotals =
+        groupedExpenseCategories[month] ?? const <String, int>{};
     final sortedCategories = Map.fromEntries(
       categoryTotals.entries.toList()
         ..sort((a, b) => b.value.compareTo(a.value)),
     );
-    final total = categoryTotals.values.fold<int>(
-      0,
-      (sum, value) => sum + value,
-    );
-    final delta = summaries.isEmpty ? 0 : total - previousTotal;
-    final percent = summaries.isEmpty || previousTotal == 0
-        ? null
-        : (delta / previousTotal) * 100;
+
+    final isFirst = summaries.isEmpty;
+    final incomeDelta = isFirst ? 0 : incomeTotal - previousIncome;
+    final expenseDelta = isFirst ? 0 : expenseTotal - previousExpense;
+    final balanceDelta = isFirst ? 0 : balance - previousBalance;
+
+    double? percentOf(int delta, int previous) {
+      if (isFirst || previous == 0) return null;
+      return (delta / previous) * 100;
+    }
+
     summaries.add(
       MonthlyExpenseSummary(
         month: month,
-        total: total,
-        delta: delta,
-        percentChange: percent,
+        incomeTotal: incomeTotal,
+        expenseTotal: expenseTotal,
+        balance: balance,
+        incomeDelta: incomeDelta,
+        expenseDelta: expenseDelta,
+        balanceDelta: balanceDelta,
+        incomePercentChange: percentOf(incomeDelta, previousIncome),
+        expensePercentChange: percentOf(expenseDelta, previousExpense),
+        balancePercentChange: percentOf(balanceDelta, previousBalance),
         categoryTotals: sortedCategories,
       ),
     );
-    previousTotal = total;
+    previousIncome = incomeTotal;
+    previousExpense = expenseTotal;
+    previousBalance = balance;
   }
   return summaries.reversed.toList();
 }
 
 int spendingAmount(ExpenseItem item) {
-  if (item.kind == '収入') return 0;
+  if (item.isIncome) return 0;
   return item.amount.abs();
 }
 
