@@ -1144,7 +1144,7 @@ class _FormShell extends StatelessWidget {
   }
 }
 
-class _MainPage extends StatelessWidget {
+class _MainPage extends StatefulWidget {
   const _MainPage({
     required this.tasks,
     required this.expenses,
@@ -1178,7 +1178,69 @@ class _MainPage extends StatelessWidget {
   final GlobalKey trashKey;
 
   @override
+  State<_MainPage> createState() => _MainPageState();
+}
+
+class _MainPageState extends State<_MainPage> {
+  // 背景グラデーションの境界が中央に来る初期値（実測できるまでの仮値）。
+  static const double _defaultBgSplit = 0.39;
+  // 部屋イラスト内の「壁と床の境界線」の、画像の高さに対する割合。
+  static const double _roomFloorLineRatio = 0.683;
+
+  final _bgKey = GlobalKey();
+  final _roomKey = GlobalKey();
+  double _bgSplit = _defaultBgSplit;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateBgSplit());
+  }
+
+  // 背景グラデーションの境界を、部屋イラスト内の壁と床の境界線が実際に
+  // 描画される位置に一致させる。画面幅やカードの折り返しでレイアウトが
+  // 変わっても常にズレないよう、描画後に実測して補正する。
+  void _updateBgSplit() {
+    if (!mounted) return;
+    final bgBox = _bgKey.currentContext?.findRenderObject() as RenderBox?;
+    final roomBox = _roomKey.currentContext?.findRenderObject() as RenderBox?;
+    if (bgBox == null ||
+        roomBox == null ||
+        !bgBox.hasSize ||
+        !roomBox.hasSize) {
+      return;
+    }
+    final bgTop = bgBox.localToGlobal(Offset.zero).dy;
+    final bgHeight = bgBox.size.height;
+    if (bgHeight <= 0) return;
+    final roomTop = roomBox.localToGlobal(Offset.zero).dy;
+    final roomHeight = roomBox.size.height;
+    final floorLineY = roomTop + roomHeight * _roomFloorLineRatio;
+    final split = ((floorLineY - bgTop) / bgHeight).clamp(0.0, 1.0);
+    if ((split - _bgSplit).abs() > 0.001) {
+      setState(() => _bgSplit = split);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // レイアウトが変わるたびに（幅の変化・カードの折り返しなど）再計測する。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateBgSplit());
+
+    final tasks = widget.tasks;
+    final expenses = widget.expenses;
+    final poiCount = widget.poiCount;
+    final doneCount = widget.doneCount;
+    final checkedIds = widget.checkedIds;
+    final monthlyBudget = widget.monthlyBudget;
+    final onExpense = widget.onExpense;
+    final onSubscription = widget.onSubscription;
+    final onTask = widget.onTask;
+    final onPoiList = widget.onPoiList;
+    final onTaskCheck = widget.onTaskCheck;
+    final onEditBudget = widget.onEditBudget;
+    final trashKey = widget.trashKey;
+
     final now = DateTime.now();
 
     // 通知日時ありのタスクを優先し、通知日時なしのタスクは末尾に回す。
@@ -1244,8 +1306,11 @@ class _MainPage extends StatelessWidget {
 
     // 画像本来の比率のまま表示する。画面全体の背景（壁色→床色の
     // グラデーション）と地続きに見せるため、ここでは余白を作らない。
+    // アスペクト比は実際に使用する room.png の比率（1537/1023）と
+    // 一致させる。ズレると BoxFit.contain で左右に余白が生まれる。
     final room = AspectRatio(
-      aspectRatio: 700 / 389,
+      key: _roomKey,
+      aspectRatio: 1537 / 1023,
       child: _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
     );
 
@@ -1323,19 +1388,29 @@ class _MainPage extends StatelessWidget {
 
     return SingleChildScrollView(
       child: Container(
+        key: _bgKey,
         width: double.infinity,
         // 画面全体の背景を壁色→床色のグラデーションにし、
         // ウサギの部屋のイラストと地続きに見えるようにする。
-        decoration: const BoxDecoration(
+        // 境界の位置（_bgSplit）は固定値ではなく、部屋イラスト内の
+        // 壁と床の境界線の実際の描画位置に合わせて動的に計算する。
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xffd8e9f3), Color(0xfff7e8d0)],
-            stops: [0.39, 0.39],
+            colors: const [Color(0xffcde1f1), Color(0xfff5dcbf)],
+            stops: [_bgSplit, _bgSplit],
           ),
         ),
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-        child: content,
+        // ブラウザ幅を広げてもウサギの部屋の画像や各カードが際限なく
+        // 引き伸ばされないよう、コンテンツ全体の最大幅を制限して中央寄せにする。
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 960),
+            child: content,
+          ),
+        ),
       ),
     );
   }
