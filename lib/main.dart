@@ -55,12 +55,11 @@ class NoPoiHome extends StatefulWidget {
   State<NoPoiHome> createState() => _NoPoiHomeState();
 }
 
-class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
+class _NoPoiHomeState extends State<NoPoiHome> {
   static const _storageKey = 'nopoi_flutter_state_v1';
   final _taskController = TextEditingController();
   final _amountController = TextEditingController();
   final _otherExpenseController = TextEditingController();
-  final _paperKey = GlobalKey();
   final _trashKey = GlobalKey();
 
   AppPage _page = AppPage.choice;
@@ -75,17 +74,16 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
   final Set<String> _checkedTaskIds = {};
   // ホーム画面「今日の予定」でのチェック（Poi/Doneには影響しない軽量な完了マーク）。
   final Set<String> _doneMarkIds = {};
-  Offset? _paperStart;
-  Offset? _paperEnd;
-  late AnimationController _paperController;
+  // 部屋に溜まっている「まだ片付いていないPoi」の数。Poiで増え、Doneで減る。
+  // kRoomLitterCapacity を超えた分はゴミ箱からあふれて床に散らかる。
+  int _roomLitter = 0;
+  // タスク管理画面でPoiした直後にホーム画面へ戻った時、紙が落ちてくる演出を
+  // 出すためのキュー。true＝ゴミ箱からあふれて床に落ちる、false＝ゴミ箱に収まる。
+  final List<bool> _pendingRoomDrops = [];
 
   @override
   void initState() {
     super.initState();
-    _paperController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 850),
-    );
     _load();
   }
 
@@ -94,7 +92,6 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
     _taskController.dispose();
     _amountController.dispose();
     _otherExpenseController.dispose();
-    _paperController.dispose();
     super.dispose();
   }
 
@@ -123,6 +120,7 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       _doneMarkIds
         ..clear()
         ..addAll((data['doneMarkIds'] as List? ?? []).cast<String>());
+      _roomLitter = data['roomLitter'] as int? ?? 0;
     });
     await _recordDueSubscriptions();
   }
@@ -139,6 +137,7 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
         'monthlyBudget': _monthlyBudget,
         'doneMarkIds': _doneMarkIds.toList(),
         'subscriptions': _subscriptions.map((e) => e.toJson()).toList(),
+        'roomLitter': _roomLitter,
       }),
     );
   }
@@ -219,6 +218,8 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       _checkedTaskIds.clear();
       _doneMarkIds.clear();
       _notifyAt = null;
+      _roomLitter = 0;
+      _pendingRoomDrops.clear();
     });
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_storageKey);
@@ -548,15 +549,13 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
   }
 
   Future<void> _poiTask(NopoiTask task) async {
-    _setPaperFlight();
-    await _paperController.forward(from: 0);
-    if (!mounted) return;
     setState(() {
-      _paperStart = null;
-      _paperEnd = null;
       _tasks.removeWhere((item) => item.id == task.id);
       _poiTasks.insert(0, task.copyWith(movedAt: DateTime.now()));
       _doneMarkIds.remove(task.id);
+      _roomLitter++;
+      // ゴミ箱の許容量を超えた分は、床にあふれて落ちる演出にする。
+      _pendingRoomDrops.add(_roomLitter > kRoomLitterCapacity);
     });
     await NotificationService.instance.cancelTask(task);
     await _save();
@@ -571,21 +570,18 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       _checkedTaskIds.remove(task.id);
       _doneMarkIds.remove(task.id);
       _doneTasks.insert(0, task.copyWith(movedAt: DateTime.now()));
+      // タスクをきちんと片付けたご褒美として、部屋のゴミの数を1つ減らす。
+      if (_roomLitter > 0) _roomLitter--;
     });
     await NotificationService.instance.cancelTask(task);
     await _save();
   }
 
-  void _setPaperFlight() {
-    final paperBox = _paperKey.currentContext?.findRenderObject() as RenderBox?;
-    final trashBox = _trashKey.currentContext?.findRenderObject() as RenderBox?;
-    if (paperBox == null || trashBox == null) return;
-    final start = paperBox.localToGlobal(paperBox.size.center(Offset.zero));
-    final end = trashBox.localToGlobal(trashBox.size.center(Offset.zero));
-    setState(() {
-      _paperStart = start;
-      _paperEnd = end;
-    });
+  // ホーム画面に戻った時に一度だけ消費される、落下演出待ちのキュー。
+  List<bool> _consumePendingRoomDrops() {
+    final drops = List<bool>.of(_pendingRoomDrops);
+    _pendingRoomDrops.clear();
+    return drops;
   }
 
   @override
@@ -593,37 +589,10 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
     return Scaffold(
       backgroundColor: const Color(0xfff5faf6),
       body: SafeArea(
-        child: Stack(
+        child: Column(
           children: [
-            Column(
-              children: [
-                _Header(onChoice: () => setState(() => _page = AppPage.choice)),
-                Expanded(child: _buildPage()),
-              ],
-            ),
-            if (_paperStart != null && _paperEnd != null)
-              AnimatedBuilder(
-                animation: _paperController,
-                builder: (context, child) {
-                  final t = Curves.easeInOutCubic.transform(
-                    _paperController.value,
-                  );
-                  final arc = sin(t * pi) * -90;
-                  final pos =
-                      Offset.lerp(_paperStart, _paperEnd, t)! + Offset(0, arc);
-                  return Positioned(
-                    left: pos.dx - 18,
-                    top: pos.dy - 18,
-                    child: Transform.rotate(
-                      angle: t * pi * 4,
-                      child: Opacity(
-                        opacity: 1 - (t * .7),
-                        child: const CrumpledPaper(size: 42),
-                      ),
-                    ),
-                  );
-                },
-              ),
+            _Header(onChoice: () => setState(() => _page = AppPage.choice)),
+            Expanded(child: _buildPage()),
           ],
         ),
       ),
@@ -688,6 +657,8 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
           doneCount: _doneTasks.length,
           checkedIds: _doneMarkIds,
           monthlyBudget: _monthlyBudget,
+          roomLitter: _roomLitter,
+          consumePendingDrops: _consumePendingRoomDrops,
           onExpense: () => setState(() => _page = AppPage.expense),
           onExpenseHistory: () =>
               setState(() => _page = AppPage.expenseHistory),
@@ -707,7 +678,6 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
           onTask: () => setState(() => _page = AppPage.task),
           onPoi: _poiTask,
           onDone: _doneTask,
-          paperKey: _paperKey,
         );
     }
   }
@@ -1152,6 +1122,8 @@ class _MainPage extends StatefulWidget {
     required this.doneCount,
     required this.checkedIds,
     required this.monthlyBudget,
+    required this.roomLitter,
+    required this.consumePendingDrops,
     required this.onExpense,
     required this.onExpenseHistory,
     required this.onSubscription,
@@ -1168,6 +1140,10 @@ class _MainPage extends StatefulWidget {
   final int doneCount;
   final Set<String> checkedIds;
   final int monthlyBudget;
+  // 部屋に溜まっている未清算のPoiの数（Doneすると減る）。
+  final int roomLitter;
+  // ホーム画面に来たときに一度だけ消費する、落下演出待ちのキュー。
+  final List<bool> Function() consumePendingDrops;
   final VoidCallback onExpense;
   final VoidCallback onExpenseHistory;
   final VoidCallback onSubscription;
@@ -1240,6 +1216,8 @@ class _MainPageState extends State<_MainPage> {
     final onTaskCheck = widget.onTaskCheck;
     final onEditBudget = widget.onEditBudget;
     final trashKey = widget.trashKey;
+    final roomLitter = widget.roomLitter;
+    final consumePendingDrops = widget.consumePendingDrops;
 
     final now = DateTime.now();
 
@@ -1311,7 +1289,13 @@ class _MainPageState extends State<_MainPage> {
     final room = AspectRatio(
       key: _roomKey,
       aspectRatio: 1537 / 1023,
-      child: _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
+      child: _RoomPanel(
+        poiCount: poiCount,
+        roomLitter: roomLitter,
+        consumePendingDrops: consumePendingDrops,
+        onPoiList: onPoiList,
+        trashKey: trashKey,
+      ),
     );
 
     final content = Column(
@@ -1606,15 +1590,106 @@ class _TodayTaskTile extends StatelessWidget {
   }
 }
 
-class _RoomPanel extends StatelessWidget {
+// ゴミ箱に収まる紙くずの数。これを超えると床にあふれて散らかる。
+const int kRoomLitterCapacity = 6;
+
+class _RoomPanel extends StatefulWidget {
   const _RoomPanel({
     required this.poiCount,
+    required this.roomLitter,
+    required this.consumePendingDrops,
     required this.onPoiList,
     required this.trashKey,
   });
   final int poiCount;
+  final int roomLitter;
+  final List<bool> Function() consumePendingDrops;
   final VoidCallback onPoiList;
   final GlobalKey trashKey;
+
+  @override
+  State<_RoomPanel> createState() => _RoomPanelState();
+}
+
+class _RoomPanelState extends State<_RoomPanel>
+    with SingleTickerProviderStateMixin {
+  // 床にあふれた紙くずを散らかす範囲（部屋イラストに対する割合）。
+  // ウサギやゴミ箱の上に重ならないよう、床の左〜中央寄りに限定する。
+  static const _floorMinX = 0.06;
+  static const _floorMaxX = 0.66;
+  static const _floorMinY = 0.60;
+  static const _floorMaxY = 0.95;
+  static const _maxVisibleFloorPapers = 24;
+
+  late final AnimationController _dropController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 650),
+  );
+  final List<bool> _dropQueue = [];
+  bool _isDropping = false;
+  bool _dropIsOverflow = false;
+  // 床にすでに落ちて表示されている紙くずの数。
+  late int _revealedFloorPapers;
+
+  @override
+  void initState() {
+    super.initState();
+    final drops = widget.consumePendingDrops();
+    final overflowTotal = max(0, widget.roomLitter - kRoomLitterCapacity);
+    final pendingOverflow = drops.where((isOverflow) => isOverflow).length;
+    // まだ見せていない分は、落下アニメーションが終わってから1つずつ床に
+    // 出す（先に全部出すと、落ちてくる前から紙が見えてしまうため）。
+    _revealedFloorPapers = (overflowTotal - pendingOverflow).clamp(
+      0,
+      overflowTotal,
+    );
+    _dropQueue.addAll(drops);
+    if (_dropQueue.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _playNextDrop());
+    }
+  }
+
+  @override
+  void dispose() {
+    _dropController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _playNextDrop() async {
+    if (!mounted || _dropQueue.isEmpty || _isDropping) return;
+    final isOverflow = _dropQueue.removeAt(0);
+    setState(() {
+      _isDropping = true;
+      _dropIsOverflow = isOverflow;
+    });
+    await _dropController.forward(from: 0);
+    if (!mounted) return;
+    setState(() {
+      _isDropping = false;
+      if (isOverflow) _revealedFloorPapers++;
+    });
+    if (_dropQueue.isNotEmpty) {
+      await Future.delayed(const Duration(milliseconds: 180));
+      await _playNextDrop();
+    }
+  }
+
+  Offset _floorSpotFraction(int index) {
+    final random = Random(index * 7919 + 11);
+    final fx = _floorMinX + random.nextDouble() * (_floorMaxX - _floorMinX);
+    final fy = _floorMinY + random.nextDouble() * (_floorMaxY - _floorMinY);
+    return Offset(fx, fy);
+  }
+
+  double _floorRotation(int index) {
+    final random = Random(index * 733 + 29);
+    return (random.nextDouble() - .5) * .9;
+  }
+
+  double _floorScale(int index) {
+    final random = Random(index * 331 + 5);
+    return .78 + random.nextDouble() * .4;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1638,7 +1713,31 @@ class _RoomPanel extends StatelessWidget {
         }
         final imageLeft = (width - imageW) / 2;
         final imageTop = (height - imageH) / 2;
+
+        // ゴミ箱の中心（タップ領域と同じ基準）。
+        final trashCenter = Offset(
+          imageW * ((.742 + .852) / 2),
+          imageH * ((.552 + .777) / 2),
+        );
+        // 今アニメーション中の紙の落下先（あふれる場合は次に表示される
+        // 床の位置、収まる場合はゴミ箱の中心）。
+        final dropTargetFraction = _dropIsOverflow
+            ? _floorSpotFraction(_revealedFloorPapers)
+            : null;
+        final dropTarget = dropTargetFraction != null
+            ? Offset(
+                imageW * dropTargetFraction.dx,
+                imageH * dropTargetFraction.dy,
+              )
+            : trashCenter;
+
+        final floorPaperCount = min(
+          _revealedFloorPapers,
+          _maxVisibleFloorPapers,
+        );
+
         return Stack(
+          clipBehavior: Clip.none,
           children: [
             Positioned.fill(
               child: Image.asset(
@@ -1648,17 +1747,65 @@ class _RoomPanel extends StatelessWidget {
                 filterQuality: FilterQuality.high,
               ),
             ),
+            // ゴミ箱からあふれて床に散らかったままの紙くず
+            // （Doneでタスクを片付けると少しずつ減っていく）。
+            for (var i = 0; i < floorPaperCount; i++)
+              (() {
+                final spot = _floorSpotFraction(i);
+                return Positioned(
+                  left: imageLeft + imageW * spot.dx - 16,
+                  top: imageTop + imageH * spot.dy - 14,
+                  child: IgnorePointer(
+                    child: Transform.rotate(
+                      angle: _floorRotation(i),
+                      child: Transform.scale(
+                        scale: _floorScale(i),
+                        child: const CrumpledPaper(size: 32),
+                      ),
+                    ),
+                  ),
+                );
+              })(),
+            // タスク管理画面でPoiした紙が、部屋に戻ってきた時に画面上から
+            // 落ちてくる演出。一定量まではゴミ箱の中へ、あふれた分は
+            // ウサギを避けて床の上へ落ちる。
+            if (_isDropping)
+              AnimatedBuilder(
+                animation: _dropController,
+                builder: (context, child) {
+                  final t = Curves.easeIn.transform(_dropController.value);
+                  final startY = -imageH * .28;
+                  final dx = imageLeft + dropTarget.dx;
+                  final dy = imageTop + startY + (dropTarget.dy - startY) * t;
+                  final settle = _dropController.value > .85
+                      ? (1 - (_dropController.value - .85) / .15) * 6
+                      : 0.0;
+                  return Positioned(
+                    left: dx - 16,
+                    top: dy - 14 - settle,
+                    child: Opacity(
+                      // ゴミ箱に収まる場合は最後にフェードして消える。
+                      // 床にあふれる場合はそのまま残り続ける。
+                      opacity: _dropIsOverflow ? 1 : (1 - t * .6),
+                      child: Transform.rotate(
+                        angle: t * pi * 2.4,
+                        child: const CrumpledPaper(size: 32),
+                      ),
+                    ),
+                  );
+                },
+              ),
             // イラスト内のゴミ箱の位置に合わせた透明なタップ領域
             // （画像の実描画矩形を基準に計算する）。
             Positioned(
-              key: trashKey,
+              key: widget.trashKey,
               left: imageLeft + imageW * .742,
               top: imageTop + imageH * .552,
               width: imageW * (.852 - .742),
               height: imageH * (.777 - .552),
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: onPoiList,
+                onTap: widget.onPoiList,
               ),
             ),
           ],
@@ -2706,7 +2853,6 @@ class _PoiPage extends StatelessWidget {
     required this.onTask,
     required this.onPoi,
     required this.onDone,
-    required this.paperKey,
   });
   final List<NopoiTask> tasks;
   final List<NopoiTask> poiTasks;
@@ -2715,7 +2861,6 @@ class _PoiPage extends StatelessWidget {
   final VoidCallback onTask;
   final ValueChanged<NopoiTask> onPoi;
   final ValueChanged<NopoiTask> onDone;
-  final GlobalKey paperKey;
 
   @override
   Widget build(BuildContext context) {
@@ -2744,7 +2889,6 @@ class _PoiPage extends StatelessWidget {
               tasks: tasks,
               onPoi: onPoi,
               onDone: onDone,
-              paperKey: paperKey,
             ),
           ),
           const SizedBox(height: 14),
@@ -2791,12 +2935,10 @@ class _UndoneTaskPanel extends StatelessWidget {
     required this.tasks,
     required this.onPoi,
     required this.onDone,
-    required this.paperKey,
   });
   final List<NopoiTask> tasks;
   final ValueChanged<NopoiTask> onPoi;
   final ValueChanged<NopoiTask> onDone;
-  final GlobalKey paperKey;
 
   @override
   Widget build(BuildContext context) {
@@ -2814,7 +2956,6 @@ class _UndoneTaskPanel extends StatelessWidget {
               itemBuilder: (context, index) {
                 final task = tasks[index];
                 return Container(
-                  key: index == 0 ? paperKey : null,
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
                     color: Colors.white,
