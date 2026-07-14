@@ -1,0 +1,1257 @@
+﻿diff --cc lib/main.dart
+index c5874ad,730b2ba..0000000
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@@ -70,10 -70,8 +70,11 @@@ class _NoPoiHomeState extends State<NoP
+    List<NopoiTask> _poiTasks = [];
+    List<NopoiTask> _doneTasks = [];
+    List<ExpenseItem> _expenses = [];
+ +  int _monthlyBudget = 100000;
++   List<Subscription> _subscriptions = [];
+    final Set<String> _checkedTaskIds = {};
+ +  // 繝帙・繝逕ｻ髱｢縲御ｻ頑律縺ｮ莠亥ｮ壹阪〒縺ｮ繝√ぉ繝・け・・oi/Done縺ｫ縺ｯ蠖ｱ髻ｿ縺励↑縺・ｻｽ驥上↑螳御ｺ・・繝ｼ繧ｯ・峨・ +  final Set<String> _doneMarkIds = {};
+    Offset? _paperStart;
+    Offset? _paperEnd;
+    late AnimationController _paperController;
+@@@ -115,11 -113,11 +116,15 @@@
+        _expenses = (data['expenses'] as List? ?? [])
+            .map((e) => ExpenseItem.fromJson(e))
+            .toList();
+ +      _monthlyBudget = data['monthlyBudget'] as int? ?? 100000;
++       _subscriptions = (data['subscriptions'] as List? ?? [])
++           .map((e) => Subscription.fromJson(e))
++           .toList();
+ +      _doneMarkIds
+ +        ..clear()
+ +        ..addAll((data['doneMarkIds'] as List? ?? []).cast<String>());
+      });
++     await _recordDueSubscriptions();
+    }
+  
+    Future<void> _save() async {
+@@@ -131,8 -129,7 +136,9 @@@
+          'poiTasks': _poiTasks.map((e) => e.toJson()).toList(),
+          'doneTasks': _doneTasks.map((e) => e.toJson()).toList(),
+          'expenses': _expenses.map((e) => e.toJson()).toList(),
+ +        'monthlyBudget': _monthlyBudget,
+ +        'doneMarkIds': _doneMarkIds.toList(),
++         'subscriptions': _subscriptions.map((e) => e.toJson()).toList(),
+        }),
+      );
+    }
+@@@ -208,9 -205,8 +214,10 @@@
+        _poiTasks = [];
+        _doneTasks = [];
+        _expenses = [];
+ +      _monthlyBudget = 100000;
++       _subscriptions = [];
+        _checkedTaskIds.clear();
+ +      _doneMarkIds.clear();
+        _notifyAt = null;
+      });
+      final prefs = await SharedPreferences.getInstance();
+@@@ -274,53 -270,225 +281,274 @@@
+      await _save();
+    }
+  
+ +  Future<void> _editBudget() async {
+ +    final controller = TextEditingController(text: _monthlyBudget.toString());
+ +    final result = await showDialog<int>(
+ +      context: context,
+ +      builder: (context) => AlertDialog(
+ +        title: const Text('莉頑怦縺ｮ莠育ｮ励ｒ險ｭ螳・),
+ +        content: TextField(
+ +          controller: controller,
+ +          keyboardType: TextInputType.number,
+ +          autofocus: true,
+ +          decoration: const InputDecoration(
+ +            labelText: '莠育ｮ暦ｼ亥・・・,
+ +            border: OutlineInputBorder(),
+ +          ),
+ +        ),
+ +        actions: [
+ +          TextButton(
+ +            onPressed: () => Navigator.of(context).pop(),
+ +            child: const Text('繧ｭ繝｣繝ｳ繧ｻ繝ｫ'),
+ +          ),
+ +          FilledButton(
+ +            onPressed: () {
+ +              final value = int.tryParse(controller.text.trim());
+ +              Navigator.of(context).pop(value);
+ +            },
+ +            child: const Text('菫晏ｭ・),
+ +          ),
+ +        ],
+ +      ),
+ +    );
+ +    if (result != null && result >= 0) {
+ +      setState(() => _monthlyBudget = result);
+ +      await _save();
+ +    }
+ +  }
+ +
+ +  Future<void> _toggleTaskChecked(NopoiTask task) async {
+ +    setState(() {
+ +      if (_doneMarkIds.contains(task.id)) {
+ +        _doneMarkIds.remove(task.id);
+ +      } else {
+ +        _doneMarkIds.add(task.id);
+ +      }
+ +    });
+ +    await _save();
+ +  }
+ +
++   Future<void> _recordDueSubscriptions() async {
++     final now = DateTime.now();
++     var changed = false;
++     final added = <Subscription>[];
++     setState(() {
++       for (var i = 0; i < _subscriptions.length; i++) {
++         final subscription = _subscriptions[i];
++         if (!subscription.isActive) continue;
++         var month = DateTime(
++           subscription.startMonth.year,
++           subscription.startMonth.month,
++         );
++         final currentMonth = DateTime(now.year, now.month);
++         var lastRecorded = subscription.lastRecordedYearMonth;
++         while (!month.isAfter(currentMonth)) {
++           final dueDate = subscription.billingDateFor(month.year, month.month);
++           final yearMonth = Subscription.yearMonth(month);
++           final alreadyRecorded = _expenses.any(
++             (item) =>
++                 item.subscriptionId == subscription.id &&
++                 Subscription.yearMonth(item.createdAt) == yearMonth,
++           );
++           if (!dueDate.isAfter(now) && !alreadyRecorded) {
++             _expenses.insert(
++               0,
++               ExpenseItem(
++                 id: 'subscription_${subscription.id}_$yearMonth',
++                 amount: subscription.amount,
++                 kind: subscription.category,
++                 title: subscription.name,
++                 sourceType: 'subscription',
++                 subscriptionId: subscription.id,
++                 createdAt: dueDate,
++               ),
++             );
++             lastRecorded = yearMonth;
++             changed = true;
++             added.add(subscription);
++           }
++           month = DateTime(month.year, month.month + 1);
++         }
++         if (lastRecorded != subscription.lastRecordedYearMonth) {
++           _subscriptions[i] = subscription.copyWith(
++             lastRecordedYearMonth: lastRecorded,
++           );
++           changed = true;
++         }
++       }
++     });
++     if (changed) await _save();
++     for (final subscription in added.where(
++       (item) => item.notificationEnabled,
++     )) {
++       await NotificationService.instance.showSubscriptionRecorded(subscription);
++     }
++   }
++ 
++   Future<void> _saveSubscription(Subscription subscription) async {
++     setState(() {
++       final index = _subscriptions.indexWhere(
++         (item) => item.id == subscription.id,
++       );
++       if (index == -1) {
++         _subscriptions.insert(0, subscription);
++       } else {
++         _subscriptions[index] = subscription;
++       }
++     });
++     await _save();
++     await _recordDueSubscriptions();
++   }
++ 
++   Future<void> _toggleSubscription(Subscription subscription) async {
++     await _saveSubscription(
++       subscription.copyWith(isActive: !subscription.isActive),
++     );
++   }
++ 
++   Future<void> _deleteSubscription(Subscription subscription) async {
++     setState(
++       () => _subscriptions.removeWhere((item) => item.id == subscription.id),
++     );
++     await _save();
++   }
++ 
++   Future<void> _showSubscriptionEditor([Subscription? existing]) async {
++     final name = TextEditingController(text: existing?.name ?? '');
++     final amount = TextEditingController(
++       text: existing?.amount.toString() ?? '',
++     );
++     final memo = TextEditingController(text: existing?.memo ?? '');
++     var billingDay = existing?.billingDay ?? DateTime.now().day;
++     var category = existing?.category ?? '螽ｯ讌ｽ';
++     var notificationEnabled = existing?.notificationEnabled ?? false;
++     var startMonth =
++         existing?.startMonth ??
++         DateTime(DateTime.now().year, DateTime.now().month);
++     final saved = await showDialog<bool>(
++       context: context,
++       builder: (context) => StatefulBuilder(
++         builder: (context, setDialogState) => AlertDialog(
++           title: Text(existing == null ? '繧ｵ繝悶せ繧ｯ繧定ｿｽ蜉' : '繧ｵ繝悶せ繧ｯ繧堤ｷｨ髮・),
++           content: SingleChildScrollView(
++             child: Column(
++               mainAxisSize: MainAxisSize.min,
++               children: [
++                 TextField(
++                   controller: name,
++                   decoration: const InputDecoration(labelText: '繧ｵ繝ｼ繝薙せ蜷・),
++                 ),
++                 TextField(
++                   controller: amount,
++                   keyboardType: TextInputType.number,
++                   decoration: const InputDecoration(labelText: '譛磯｡肴侭驥托ｼ亥・・・),
++                 ),
++                 const SizedBox(height: 8),
++                 DropdownButtonFormField<int>(
++                   initialValue: billingDay,
++                   decoration: const InputDecoration(labelText: '蠑輔″關ｽ縺ｨ縺玲律'),
++                   items: List.generate(
++                     31,
++                     (i) => DropdownMenuItem(
++                       value: i + 1,
++                       child: Text('豈取怦${i + 1}譌･'),
++                     ),
++                   ),
++                   onChanged: (value) =>
++                       setDialogState(() => billingDay = value!),
++                 ),
++                 DropdownButtonFormField<String>(
++                   initialValue: category,
++                   decoration: const InputDecoration(labelText: '繧ｫ繝・ざ繝ｪ'),
++                   items:
++                       const ['鬟溯ｲｻ', '莠､騾夊ｲｻ', '蜍牙ｼｷ', '驕翫・', '譌･逕ｨ蜩・, '螽ｯ讌ｽ', '逕滓ｴｻ雋ｻ', '縺昴・莉・]
++                           .map(
++                             (item) => DropdownMenuItem(
++                               value: item,
++                               child: Text(item),
++                             ),
++                           )
++                           .toList(),
++                   onChanged: (value) => setDialogState(() => category = value!),
++                 ),
++                 ListTile(
++                   contentPadding: EdgeInsets.zero,
++                   title: Text('髢句ｧ区怦: ${startMonth.year}蟷ｴ${startMonth.month}譛・),
++                   trailing: const Icon(Icons.calendar_month),
++                   onTap: () async {
++                     final selected = await showDatePicker(
++                       context: context,
++                       initialDate: startMonth,
++                       firstDate: DateTime(2020),
++                       lastDate: DateTime(2100),
++                     );
++                     if (selected != null)
++                       setDialogState(
++                         () => startMonth = DateTime(
++                           selected.year,
++                           selected.month,
++                         ),
++                       );
++                   },
++                 ),
++                 SwitchListTile(
++                   contentPadding: EdgeInsets.zero,
++                   title: const Text('閾ｪ蜍慕匳骭ｲ譎ゅ↓騾夂衍'),
++                   value: notificationEnabled,
++                   onChanged: (value) =>
++                       setDialogState(() => notificationEnabled = value),
++                 ),
++                 TextField(
++                   controller: memo,
++                   maxLines: 2,
++                   decoration: const InputDecoration(labelText: '繝｡繝｢・井ｻｻ諢擾ｼ・),
++                 ),
++               ],
++             ),
++           ),
++           actions: [
++             TextButton(
++               onPressed: () => Navigator.pop(context),
++               child: const Text('繧ｭ繝｣繝ｳ繧ｻ繝ｫ'),
++             ),
++             FilledButton(
++               onPressed: () {
++                 if (name.text.trim().isEmpty ||
++                     (int.tryParse(amount.text.trim()) ?? 0) < 1)
++                   return;
++                 Navigator.pop(context, true);
++               },
++               child: const Text('菫晏ｭ・),
++             ),
++           ],
++         ),
++       ),
++     );
++     if (saved == true) {
++       await _saveSubscription(
++         Subscription(
++           id: existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString(),
++           name: name.text.trim(),
++           amount: int.parse(amount.text.trim()),
++           billingDay: billingDay,
++           category: category,
++           memo: memo.text.trim(),
++           notificationEnabled: notificationEnabled,
++           startMonth: startMonth,
++           isActive: existing?.isActive ?? true,
++           lastRecordedYearMonth: existing?.lastRecordedYearMonth,
++           createdAt: existing?.createdAt ?? DateTime.now(),
++           updatedAt: DateTime.now(),
++         ),
++       );
++     }
++     name.dispose();
++     amount.dispose();
++     memo.dispose();
++   }
++ 
+++  }
+++
+    Future<void> _poiTask(NopoiTask task) async {
+      _setPaperFlight();
+      await _paperController.forward(from: 0);
+@@@ -440,25 -595,34 +668,37 @@@
+        case AppPage.expenseHistory:
+          return _ExpenseHistoryPage(
+            expenses: _expenses,
+ +          monthlyBudget: _monthlyBudget,
+            onHome: () => setState(() => _page = AppPage.home),
+            onExpense: () => setState(() => _page = AppPage.expense),
+ +          onEditBudget: _editBudget,
+          );
++       case AppPage.subscription:
++         return _SubscriptionPage(
++           subscriptions: _subscriptions,
++           onHome: () => setState(() => _page = AppPage.home),
++           onAdd: () => _showSubscriptionEditor(),
++           onEdit: _showSubscriptionEditor,
++           onToggle: _toggleSubscription,
++           onDelete: _deleteSubscription,
++         );
+        case AppPage.home:
+          return _MainPage(
+            tasks: _tasks,
+            expenses: _expenses,
+            poiCount: _poiTasks.length,
+ -          checkedIds: _checkedTaskIds,
+ +          doneCount: _doneTasks.length,
+ +          checkedIds: _doneMarkIds,
+ +          monthlyBudget: _monthlyBudget,
+            onExpense: () => setState(() => _page = AppPage.expense),
++           onExpenseHistory: () =>
++               setState(() => _page = AppPage.expenseHistory),
++           onSubscription: () => setState(() => _page = AppPage.subscription),
+            onTask: () => setState(() => _page = AppPage.task),
+            onPoiList: () => setState(() => _page = AppPage.poi),
+ -          onPoi: _poiTask,
+ -          onDone: _doneTask,
+ +          onTaskCheck: _toggleTaskChecked,
+ +          onEditBudget: _editBudget,
+            trashKey: _trashKey,
+ -          paperKey: _paperKey,
+          );
+        case AppPage.poi:
+          return _PoiPage(
+@@@ -901,181 -988,82 +1151,224 @@@ class _MainPage extends StatelessWidge
+      required this.tasks,
+      required this.expenses,
+      required this.poiCount,
+ +    required this.doneCount,
+      required this.checkedIds,
+ +    required this.monthlyBudget,
+      required this.onExpense,
++     required this.onExpenseHistory,
++     required this.onSubscription,
+      required this.onTask,
+      required this.onPoiList,
+ -    required this.onPoi,
+ -    required this.onDone,
+ +    required this.onTaskCheck,
+ +    required this.onEditBudget,
+      required this.trashKey,
+ -    required this.paperKey,
+    });
+  
+    final List<NopoiTask> tasks;
+    final List<ExpenseItem> expenses;
+    final int poiCount;
+ +  final int doneCount;
+    final Set<String> checkedIds;
+ +  final int monthlyBudget;
+    final VoidCallback onExpense;
++   final VoidCallback onExpenseHistory;
++   final VoidCallback onSubscription;
+    final VoidCallback onTask;
+    final VoidCallback onPoiList;
+ -  final ValueChanged<NopoiTask> onPoi;
+ -  final ValueChanged<NopoiTask> onDone;
+ +  final ValueChanged<NopoiTask> onTaskCheck;
+ +  final VoidCallback onEditBudget;
+    final GlobalKey trashKey;
+ -  final GlobalKey paperKey;
+  
+    @override
+    Widget build(BuildContext context) {
+ -    final wide = MediaQuery.of(context).size.width > 900;
+ -    final content = [
+ -      _TaskPanel(
+ -        tasks: tasks,
+ -        checkedIds: checkedIds,
+ -        onPoi: onPoi,
+ -        onDone: onDone,
+ -        paperKey: paperKey,
+ +    final now = DateTime.now();
+ +
+ +    // 騾夂衍譌･譎ゅ≠繧翫・繧ｿ繧ｹ繧ｯ繧貞━蜈医＠縲・夂衍譌･譎ゅ↑縺励・繧ｿ繧ｹ繧ｯ縺ｯ譛ｫ蟆ｾ縺ｫ蝗槭☆縲・ +    final sortedTasks = [...tasks]
+ +      ..sort((a, b) {
+ +        if (a.notifyAt == null && b.notifyAt == null) {
+ +          return a.createdAt.compareTo(b.createdAt);
+ +        }
+ +        if (a.notifyAt == null) return 1;
+ +        if (b.notifyAt == null) return -1;
+ +        return a.notifyAt!.compareTo(b.notifyAt!);
+ +      });
+ +
+ +    final todayTasks = sortedTasks
+ +        .where(
+ +          (task) =>
+ +              task.notifyAt == null ||
+ +              (task.notifyAt!.year == now.year &&
+ +                  task.notifyAt!.month == now.month &&
+ +                  task.notifyAt!.day == now.day),
+ +        )
+ +        .toList();
+ +
+ +    final monthTasks = sortedTasks
+ +        .where(
+ +          (task) =>
+ +              task.notifyAt != null &&
+ +              task.notifyAt!.year == now.year &&
+ +              task.notifyAt!.month == now.month,
+ +        )
+ +        .toList();
+ +
+ +    final incomeTotal = expenses
+ +        .where((item) => item.isIncome)
+ +        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+ +    final expenseTotal = expenses
+ +        .where((item) => !item.isIncome)
+ +        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+ +    final balance = incomeTotal - expenseTotal;
+ +
+ +    final summaries = buildMonthlyExpenseSummaries(expenses);
+ +    final currentSummary = summaries.isNotEmpty ? summaries.first : null;
+ +    final balanceDelta = currentSummary?.balanceDelta ?? 0;
+ +
+ +    final todayExpense = expenses
+ +        .where(
+ +          (item) =>
+ +              !item.isIncome &&
+ +              item.createdAt.year == now.year &&
+ +              item.createdAt.month == now.month &&
+ +              item.createdAt.day == now.day,
+ +        )
+ +        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+ +
+ +    final monthExpense = expenses
+ +        .where(
+ +          (item) =>
+ +              !item.isIncome &&
+ +              item.createdAt.year == now.year &&
+ +              item.createdAt.month == now.month,
+ +        )
+ +        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+ +
+ +    // 逕ｻ蜒乗悽譚･縺ｮ豈皮紫縺ｮ縺ｾ縺ｾ陦ｨ遉ｺ縺吶ｋ縲ら判髱｢蜈ｨ菴薙・閭梧勹・亥｣∬牡竊貞ｺ願牡縺ｮ
+ +    // 繧ｰ繝ｩ繝・・繧ｷ繝ｧ繝ｳ・峨→蝨ｰ邯壹″縺ｫ隕九○繧九◆繧√√％縺薙〒縺ｯ菴咏區繧剃ｽ懊ｉ縺ｪ縺・・ +    final room = AspectRatio(
+ +      aspectRatio: 700 / 389,
+ +      child: _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
+ +    );
+ +
+ +    final content = Column(
+ +      crossAxisAlignment: CrossAxisAlignment.stretch,
+ +      children: [
+ +        _TodayScheduleCard(
+ +          tasks: todayTasks,
+ +          checkedIds: checkedIds,
+ +          onTaskCheck: onTaskCheck,
+ +          onSeeAll: onTask,
+ +        ),
+ +        const SizedBox(height: 14),
+ +        room,
+ +        const SizedBox(height: 14),
+ +        IntrinsicHeight(
+ +          child: Row(
+ +            crossAxisAlignment: CrossAxisAlignment.stretch,
+ +            children: [
+ +              Expanded(
+ +                child: _BalanceCard(balance: balance, balanceDelta: balanceDelta),
+ +              ),
+ +              const SizedBox(width: 14),
+ +              Expanded(
+ +                child: _BudgetStatusCard(
+ +                  incomeTotal: incomeTotal,
+ +                  expenseTotal: expenseTotal,
+ +                  balance: balance,
+ +                ),
+ +              ),
+ +            ],
+ +          ),
+ +        ),
+ +        const SizedBox(height: 14),
+ +        IntrinsicHeight(
+ +          child: Row(
+ +            crossAxisAlignment: CrossAxisAlignment.stretch,
+ +            children: [
+ +              Expanded(
+ +                child: _TaskStatusCard(
+ +                  undoneCount: tasks.length,
+ +                  doneCount: doneCount,
+ +                  poiCount: poiCount,
+ +                  onTap: onPoiList,
+ +                ),
+ +              ),
+ +              const SizedBox(width: 14),
+ +              Expanded(
+ +                child: _MonthlyScheduleCard(tasks: monthTasks, onAdd: onTask),
+ +              ),
+ +              const SizedBox(width: 14),
+ +              Expanded(
+ +                child: _ExpenseManageCard(
+ +                  todayExpense: todayExpense,
+ +                  monthExpense: monthExpense,
+ +                  monthlyBudget: monthlyBudget,
+ +                  onAdd: onExpense,
+ +                  onBudgetTap: onEditBudget,
+ +                ),
+ +              ),
+ +            ],
+ +          ),
+ +        ),
+ +      ],
+ +    );
+ +
+ +    return SingleChildScrollView(
+ +      child: Container(
+ +        width: double.infinity,
+ +        // 逕ｻ髱｢蜈ｨ菴薙・閭梧勹繧貞｣∬牡竊貞ｺ願牡縺ｮ繧ｰ繝ｩ繝・・繧ｷ繝ｧ繝ｳ縺ｫ縺励・ +        // 繧ｦ繧ｵ繧ｮ縺ｮ驛ｨ螻九・繧､繝ｩ繧ｹ繝医→蝨ｰ邯壹″縺ｫ隕九∴繧九ｈ縺・↓縺吶ｋ縲・ +        decoration: const BoxDecoration(
+ +          gradient: LinearGradient(
+ +            begin: Alignment.topCenter,
+ +            end: Alignment.bottomCenter,
+ +            colors: [Color(0xffd8e9f3), Color(0xfff7e8d0)],
+ +            stops: [0.39, 0.39],
+ +          ),
+ +        ),
+ +        padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+ +        child: content,
+        ),
++       _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
++       _MoneyPanel(
++         expenses: expenses,
++         poiCount: poiCount,
++         onExpense: onExpense,
++         onExpenseHistory: onExpenseHistory,
++         onSubscription: onSubscription,
++         onTask: onTask,
++       ),
++     ];
++     return Padding(
++       padding: const EdgeInsets.all(14),
++       child: wide
++           ? Row(
++               crossAxisAlignment: CrossAxisAlignment.stretch,
++               children: [
++                 SizedBox(width: 330, child: content[0]),
++                 const SizedBox(width: 14),
++                 Expanded(child: content[1]),
++                 const SizedBox(width: 14),
++                 SizedBox(width: 270, child: content[2]),
++               ],
++             )
++           : ListView(
++               children: [
++                 Padding(
++                   padding: const EdgeInsets.only(bottom: 14),
++                   child: SizedBox(height: 320, child: content[0]),
++                 ),
++                 Padding(
++                   padding: const EdgeInsets.only(bottom: 14),
++                   child: SizedBox(height: 470, child: content[1]),
++                 ),
++                 Padding(
++                   padding: const EdgeInsets.only(bottom: 14),
++                   child: SizedBox(height: 420, child: content[2]),
++                 ),
++               ],
++             ),
+      );
+    }
+  }
+@@@ -1332,28 -1214,74 +1625,66 @@@ class _RoomPanel extends StatelessWidge
+    }
+  }
+  
+++<<<<<<< HEAD
+ +class _BalanceCard extends StatelessWidget {
+ +  const _BalanceCard({required this.balance, required this.balanceDelta});
+ +  final int balance;
+ +  final int balanceDelta;
+++=======
++ class _MoneyPanel extends StatelessWidget {
++   const _MoneyPanel({
++     required this.expenses,
++     required this.poiCount,
++     required this.onExpense,
++     required this.onExpenseHistory,
++     required this.onSubscription,
++     required this.onTask,
++   });
++   final List<ExpenseItem> expenses;
++   final int poiCount;
++   final VoidCallback onExpense;
++   final VoidCallback onExpenseHistory;
++   final VoidCallback onSubscription;
++   final VoidCallback onTask;
+ -
+ -  @override
+ -  Widget build(BuildContext context) {
+ -    final incomeTotal = expenses
+ -        .where((item) => item.isIncome)
+ -        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+ -    final expenseTotal = expenses
+ -        .where((item) => !item.isIncome)
+ -        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+ -    final balance = incomeTotal - expenseTotal;
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+      final balanceColor = balance > 0
+          ? const Color(0xff278554)
+          : balance < 0
+          ? const Color(0xffc4565d)
+          : const Color(0xff6b7880);
+ -    return _Panel(
+ -      title: '',
+ -      child: ListView(
+ -        padding: const EdgeInsets.fromLTRB(8, 0, 2, 0),
+ +    final deltaUp = balanceDelta >= 0;
+ +    return _CardShell(
+ +      child: Column(
+ +        crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+++<<<<<<< HEAD
+ +          const Row(
+++=======
++           FilledButton(onPressed: onExpense, child: const Text('蜿取髪邂｡逅・)),
++           const SizedBox(height: 10),
++           OutlinedButton.icon(
++             onPressed: onSubscription,
++             icon: const Icon(Icons.autorenew),
++             label: const Text('繧ｵ繝悶せ繧ｯ邂｡逅・),
++           ),
++           const SizedBox(height: 10),
++           OutlinedButton(onPressed: onTask, child: const Text('繧ｿ繧ｹ繧ｯ霑ｽ蜉')),
++           const SizedBox(height: 12),
++           _StatBox(
++             label: '谿矩ｫ假ｼ亥庶謾ｯ・・,
++             value: formatSignedAmount(balance),
++             valueColor: balanceColor,
++           ),
++           const SizedBox(height: 10),
++           Row(
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+              children: [
+ -              Expanded(
+ -                child: _StatBox(
+ -                  label: '蜿主・蜷郁ｨ・,
+ -                  value: '$incomeTotal蜀・,
+ -                  valueColor: const Color(0xff278554),
+ -                ),
+ -              ),
+ -              const SizedBox(width: 8),
+ -              Expanded(
+ -                child: _StatBox(
+ -                  label: '謾ｯ蜃ｺ蜷郁ｨ・,
+ -                  value: '$expenseTotal蜀・,
+ -                  valueColor: const Color(0xffc4565d),
+ -                ),
+ -              ),
+ +              Text('谿矩ｫ・, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+ +              SizedBox(width: 4),
+ +              Text('験', style: TextStyle(fontSize: 15)),
+              ],
+            ),
+            const SizedBox(height: 10),
+@@@ -1366,335 -1309,197 +1697,523 @@@
+              ),
+            ),
+            const SizedBox(height: 10),
+++<<<<<<< HEAD
+ +          Container(
+ +            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+ +            decoration: BoxDecoration(
+ +              color: const Color(0xffe9f7ef),
+ +              borderRadius: BorderRadius.circular(20),
+ +            ),
+ +            child: Text(
+ +              '蜑肴怦豈・${formatSignedAmount(balanceDelta)} ${deltaUp ? '竊・ : '竊・}',
+ +              style: const TextStyle(
+ +                color: Color(0xff278554),
+ +                fontWeight: FontWeight.w700,
+ +                fontSize: 13,
+ +              ),
+ +            ),
+ +          ),
+++=======
++           if (expenses.isEmpty)
++             const Text(
++               '蜿取髪邂｡逅・°繧芽ｨ倬鹸縺ｧ縺阪∪縺吶・,
++               style: TextStyle(color: Color(0xff6b7880)),
++             )
++           else
++             ...expenses
++                 .take(5)
++                 .map(
++                   (item) => Container(
++                     margin: const EdgeInsets.only(bottom: 8),
++                     padding: const EdgeInsets.all(10),
++                     decoration: BoxDecoration(
++                       color: Colors.white,
++                       borderRadius: BorderRadius.circular(8),
++                       border: Border.all(color: const Color(0xffd8e1e5)),
++                     ),
++                     child: Column(
++                       crossAxisAlignment: CrossAxisAlignment.start,
++                       children: [
++                         Text(
++                           '${item.isIncome ? '+' : '-'}${item.amount.abs()}蜀・,
++                           style: TextStyle(
++                             fontWeight: FontWeight.w900,
++                             color: item.isIncome
++                                 ? const Color(0xff278554)
++                                 : const Color(0xffc4565d),
++                           ),
++                         ),
++                         Text(
++                           '${item.title ?? item.kind} / ${formatDate(item.createdAt)}${item.sourceType == 'subscription' ? ' / 繧ｵ繝悶せ繧ｯ' : ''}',
++                           style: const TextStyle(
++                             fontSize: 12,
++                             color: Color(0xff6b7880),
++                           ),
++                         ),
++                       ],
++                     ),
++                   ),
++                 ),
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+ +        ],
+ +      ),
+ +    );
+ +  }
+ +}
+ +
+++<<<<<<< HEAD
+ +class _BudgetStatusCard extends StatelessWidget {
+ +  const _BudgetStatusCard({
+ +    required this.incomeTotal,
+ +    required this.expenseTotal,
+ +    required this.balance,
+ +  });
+ +  final int incomeTotal;
+ +  final int expenseTotal;
+ +  final int balance;
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+ +    return _CardShell(
+ +      child: Column(
+ +        crossAxisAlignment: CrossAxisAlignment.start,
+ +        children: [
+ +          const _CardHeader(
+ +            icon: Icons.pie_chart,
+ +            iconColor: Color(0xff3d6fb4),
+ +            title: '蜿取髪縺ｮ迥ｶ豕・,
+ +          ),
+ +          const SizedBox(height: 14),
+ +          _BudgetRow(label: '蜿主・', value: 'ﾂ･${_comma(incomeTotal)}'),
+ +          const Padding(
+ +            padding: EdgeInsets.symmetric(vertical: 8),
+ +            child: Divider(height: 1, color: Color(0xffece3d1)),
+ +          ),
+ +          _BudgetRow(
+ +            label: '謾ｯ蜃ｺ',
+ +            value: 'ﾂ･${_comma(expenseTotal)}',
+ +            valueColor: const Color(0xffc4565d),
+ +          ),
+ +          const Padding(
+ +            padding: EdgeInsets.symmetric(vertical: 8),
+ +            child: Divider(height: 1, color: Color(0xffece3d1)),
+ +          ),
+ +          _BudgetRow(
+ +            label: '蜿取髪',
+ +            value: '${balance >= 0 ? '+' : ''}ﾂ･${_comma(balance)}',
+ +            valueColor: balance >= 0
+ +                ? const Color(0xff278554)
+ +                : const Color(0xffc4565d),
+ +            bold: true,
+ +          ),
+ +        ],
+ +      ),
+ +    );
+ +  }
+ +}
+ +
+ +class _BudgetRow extends StatelessWidget {
+ +  const _BudgetRow({
+ +    required this.label,
+ +    required this.value,
+ +    this.valueColor,
+ +    this.bold = false,
+ +  });
+ +  final String label;
+ +  final String value;
+ +  final Color? valueColor;
+ +  final bool bold;
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+ +    return Row(
+ +      children: [
+ +        Text(
+ +          label,
+ +          style: const TextStyle(color: Color(0xff6b7880), fontSize: 13),
+ +        ),
+ +        const Spacer(),
+ +        Flexible(
+ +          child: Text(
+ +            value,
+ +            textAlign: TextAlign.right,
+ +            overflow: TextOverflow.ellipsis,
+ +            style: TextStyle(
+ +              fontSize: 13,
+ +              fontWeight: bold ? FontWeight.w900 : FontWeight.w700,
+ +              color: valueColor ?? const Color(0xff3a3a3a),
+ +            ),
+ +          ),
+ +        ),
+ +      ],
+ +    );
+ +  }
+ +}
+ +
+ +class _TaskStatusCard extends StatelessWidget {
+ +  const _TaskStatusCard({
+ +    required this.undoneCount,
+ +    required this.doneCount,
+ +    required this.poiCount,
+ +    required this.onTap,
+ +  });
+ +  final int undoneCount;
+ +  final int doneCount;
+ +  final int poiCount;
+ +  final VoidCallback onTap;
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+ +    return _CardShell(
+ +      padding: const EdgeInsets.all(12),
+ +      child: Column(
+ +        crossAxisAlignment: CrossAxisAlignment.start,
+ +        children: [
+ +          const _CardHeader(
+ +            icon: Icons.assignment_outlined,
+ +            iconColor: Color(0xff5a9c73),
+ +            title: '繧ｿ繧ｹ繧ｯ縺ｮ迥ｶ豕・,
+ +            compact: true,
+ +          ),
+ +          const SizedBox(height: 10),
+ +          _TaskStatusRow(label: '譛ｪ螳御ｺ・, count: undoneCount, onTap: onTap),
+ +          _TaskStatusRow(label: '螳御ｺ・, count: doneCount, onTap: onTap),
+ +          _TaskStatusRow(label: 'Poi縺励◆謨ｰ', count: poiCount, onTap: onTap),
+ +        ],
+ +      ),
+ +    );
+ +  }
+ +}
+ +
+ +class _TaskStatusRow extends StatelessWidget {
+ +  const _TaskStatusRow({
+ +    required this.label,
+ +    required this.count,
+ +    required this.onTap,
+ +  });
+ +  final String label;
+ +  final int count;
+ +  final VoidCallback onTap;
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+ +    return InkWell(
+ +      onTap: onTap,
+ +      child: Padding(
+ +        padding: const EdgeInsets.symmetric(vertical: 6),
+ +        child: Row(
+ +          children: [
+ +            Text(
+ +              label,
+ +              style: const TextStyle(color: Color(0xff3a3a3a), fontSize: 13),
+ +            ),
+ +            const Spacer(),
+ +            Text(
+ +              '$count',
+ +              style: const TextStyle(
+ +                fontWeight: FontWeight.w800,
+ +                fontSize: 13,
+ +                color: Color(0xff278554),
+ +              ),
+ +            ),
+ +            const Icon(Icons.chevron_right, size: 18, color: Color(0xffb7c3c7)),
+ +          ],
+ +        ),
+ +      ),
+ +    );
+ +  }
+ +}
+ +
+ +class _MonthlyScheduleCard extends StatelessWidget {
+ +  const _MonthlyScheduleCard({required this.tasks, required this.onAdd});
+ +  final List<NopoiTask> tasks;
+ +  final VoidCallback onAdd;
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+ +    return _CardShell(
+ +      padding: const EdgeInsets.all(12),
+ +      child: Column(
+ +        crossAxisAlignment: CrossAxisAlignment.start,
+ +        children: [
+ +          const _CardHeader(
+ +            icon: Icons.calendar_today,
+ +            iconColor: Color(0xffe08a3e),
+ +            title: '莉頑怦縺ｮ莠亥ｮ・,
+ +            compact: true,
+ +          ),
+ +          const SizedBox(height: 10),
+ +          if (tasks.isEmpty)
+ +            const Padding(
+ +              padding: EdgeInsets.symmetric(vertical: 8),
+ +              child: Text(
+ +                '莉頑怦縺ｮ莠亥ｮ壹・縺ｾ縺縺ゅｊ縺ｾ縺帙ｓ縲・,
+ +                style: TextStyle(color: Color(0xff6b7880), fontSize: 13),
+ +              ),
+ +            )
+ +          else
+ +            ...tasks.take(3).map(
+ +              (task) => Padding(
+ +                padding: const EdgeInsets.symmetric(vertical: 6),
+ +                child: Row(
+ +                  children: [
+ +                    const Icon(
+ +                      Icons.radio_button_unchecked,
+ +                      size: 18,
+ +                      color: Color(0xffc9c2ac),
+ +                    ),
+ +                    const SizedBox(width: 8),
+ +                    Expanded(
+ +                      child: Text(
+ +                        task.text,
+ +                        overflow: TextOverflow.ellipsis,
+ +                        style: const TextStyle(fontSize: 13),
+ +                      ),
+ +                    ),
+ +                    Text(
+ +                      task.notifyAt == null ? '' : '${task.notifyAt!.day}譌･',
+ +                      style: const TextStyle(
+ +                        color: Color(0xff6b7880),
+ +                        fontSize: 12,
+ +                      ),
+ +                    ),
+ +                  ],
+ +                ),
+ +              ),
+ +            ),
+ +          const SizedBox(height: 8),
+ +          SizedBox(
+ +            width: double.infinity,
+ +            child: FilledButton.icon(
+ +              style: FilledButton.styleFrom(
+ +                backgroundColor: const Color(0xfffbead1),
+ +                foregroundColor: const Color(0xff8a5a1e),
+ +                padding: const EdgeInsets.symmetric(vertical: 8),
+ +                textStyle: const TextStyle(fontSize: 13),
+ +              ),
+ +              onPressed: onAdd,
+ +              icon: const Icon(Icons.add, size: 16),
+ +              label: const Text('莠亥ｮ壹ｒ霑ｽ蜉'),
+ +            ),
+ +          ),
+          ],
+        ),
+      );
+    }
+  }
+  
+ +class _ExpenseManageCard extends StatelessWidget {
+ +  const _ExpenseManageCard({
+ +    required this.todayExpense,
+ +    required this.monthExpense,
+ +    required this.monthlyBudget,
+ +    required this.onAdd,
+ +    required this.onBudgetTap,
+ +  });
+ +  final int todayExpense;
+ +  final int monthExpense;
+ +  final int monthlyBudget;
+ +  final VoidCallback onAdd;
+ +  final VoidCallback onBudgetTap;
+ +
+ +  @override
+ +  Widget build(BuildContext context) {
+ +    return _CardShell(
+ +      padding: const EdgeInsets.all(12),
+ +      child: Column(
+ +        crossAxisAlignment: CrossAxisAlignment.start,
+ +        children: [
+ +          const _CardHeader(
+ +            icon: Icons.account_balance_wallet_outlined,
+ +            iconColor: Color(0xff3d6fb4),
+ +            title: '謾ｯ蜃ｺ邂｡逅・,
+ +            compact: true,
+ +          ),
+ +          const SizedBox(height: 10),
+ +          _BudgetRow(label: '莉頑律縺ｮ謾ｯ蜃ｺ', value: 'ﾂ･${_comma(todayExpense)}'),
+ +          const SizedBox(height: 6),
+ +          _BudgetRow(label: '莉頑怦縺ｮ謾ｯ蜃ｺ', value: 'ﾂ･${_comma(monthExpense)}'),
+ +          const SizedBox(height: 6),
+ +          InkWell(
+ +            onTap: onBudgetTap,
+ +            child: _BudgetRow(label: '莉頑怦縺ｮ莠育ｮ・, value: 'ﾂ･${_comma(monthlyBudget)}'),
+ +          ),
+ +          const SizedBox(height: 10),
+ +          SizedBox(
+ +            width: double.infinity,
+ +            child: FilledButton.icon(
+ +              style: FilledButton.styleFrom(
+ +                backgroundColor: const Color(0xffdcebfb),
+ +                foregroundColor: const Color(0xff2b5f96),
+ +                padding: const EdgeInsets.symmetric(vertical: 8),
+ +                textStyle: const TextStyle(fontSize: 13),
+ +              ),
+ +              onPressed: onAdd,
+ +              icon: const Icon(Icons.add, size: 16),
+ +              label: const Text('謾ｯ蜃ｺ繧定ｿｽ蜉'),
+ +            ),
+ +          ),
+++=======
++ class _SubscriptionPage extends StatelessWidget {
++   const _SubscriptionPage({
++     required this.subscriptions,
++     required this.onHome,
++     required this.onAdd,
++     required this.onEdit,
++     required this.onToggle,
++     required this.onDelete,
++   });
++   final List<Subscription> subscriptions;
++   final VoidCallback onHome;
++   final VoidCallback onAdd;
++   final ValueChanged<Subscription> onEdit;
++   final ValueChanged<Subscription> onToggle;
++   final ValueChanged<Subscription> onDelete;
++ 
++   @override
++   Widget build(BuildContext context) {
++     return Padding(
++       padding: const EdgeInsets.all(18),
++       child: Column(
++         children: [
++           Expanded(
++             child: _Panel(
++               title: '繧ｵ繝悶せ繧ｯ邂｡逅・,
++               child: subscriptions.isEmpty
++                   ? const Text(
++                       '繧ｵ繝悶せ繧ｯ繧定ｿｽ蜉縺吶ｋ縺ｨ縲∵欠螳壽律縺ｫ謾ｯ蜃ｺ縺ｸ閾ｪ蜍戊ｨ倬鹸縺励∪縺吶・,
++                       style: TextStyle(color: Color(0xff6b7880)),
++                     )
++                   : ListView.separated(
++                       padding: EdgeInsets.zero,
++                       itemCount: subscriptions.length,
++                       separatorBuilder: (_, _) => const SizedBox(height: 10),
++                       itemBuilder: (context, index) {
++                         final item = subscriptions[index];
++                         return Container(
++                           padding: const EdgeInsets.all(12),
++                           decoration: BoxDecoration(
++                             color: Colors.white,
++                             borderRadius: BorderRadius.circular(8),
++                             border: Border.all(color: const Color(0xffd8e1e5)),
++                           ),
++                           child: Column(
++                             crossAxisAlignment: CrossAxisAlignment.start,
++                             children: [
++                               Row(
++                                 children: [
++                                   Expanded(
++                                     child: Text(
++                                       item.name,
++                                       style: const TextStyle(
++                                         fontSize: 18,
++                                         fontWeight: FontWeight.w900,
++                                       ),
++                                     ),
++                                   ),
++                                   Chip(
++                                     label: Text(item.isActive ? '譛牙柑' : '蛛懈ｭ｢荳ｭ'),
++                                   ),
++                                 ],
++                               ),
++                               Text('${item.amount}蜀・/ 譛医繝ｻ縲${item.category}'),
++                               const SizedBox(height: 4),
++                               Text(
++                                 '谺｡蝗・ ${formatDate(item.nextBillingDate(DateTime.now()))}縲騾夂衍: ${item.notificationEnabled ? 'ON' : 'OFF'}',
++                                 style: const TextStyle(
++                                   fontSize: 12,
++                                   color: Color(0xff6b7880),
++                                 ),
++                               ),
++                               if (item.memo.isNotEmpty)
++                                 Text(
++                                   item.memo,
++                                   style: const TextStyle(
++                                     fontSize: 12,
++                                     color: Color(0xff6b7880),
++                                   ),
++                                 ),
++                               const SizedBox(height: 8),
++                               Wrap(
++                                 spacing: 8,
++                                 children: [
++                                   OutlinedButton(
++                                     onPressed: () => onEdit(item),
++                                     child: const Text('邱ｨ髮・),
++                                   ),
++                                   OutlinedButton(
++                                     onPressed: () => onToggle(item),
++                                     child: Text(item.isActive ? '蛛懈ｭ｢' : '蜀埼幕'),
++                                   ),
++                                   TextButton(
++                                     onPressed: () async {
++                                       final ok = await showDialog<bool>(
++                                         context: context,
++                                         builder: (context) => AlertDialog(
++                                           title: const Text('繧ｵ繝悶せ繧ｯ繧貞炎髯､縺励∪縺吶°・・),
++                                           content: const Text(
++                                             '驕主悉縺ｫ險倬鹸縺輔ｌ縺滓髪蜃ｺ螻･豁ｴ縺ｯ蜑企勁縺輔ｌ縺ｾ縺帙ｓ縲・,
++                                           ),
++                                           actions: [
++                                             TextButton(
++                                               onPressed: () =>
++                                                   Navigator.pop(context),
++                                               child: const Text('繧ｭ繝｣繝ｳ繧ｻ繝ｫ'),
++                                             ),
++                                             FilledButton(
++                                               onPressed: () =>
++                                                   Navigator.pop(context, true),
++                                               child: const Text('蜑企勁'),
++                                             ),
++                                           ],
++                                         ),
++                                       );
++                                       if (ok == true) onDelete(item);
++                                     },
++                                     child: const Text('蜑企勁'),
++                                   ),
++                                 ],
++                               ),
++                             ],
++                           ),
++                         );
++                       },
++                     ),
++             ),
++           ),
++           const SizedBox(height: 12),
++           Wrap(
++             spacing: 10,
++             children: [
++               OutlinedButton(onPressed: onHome, child: const Text('繝｡繧､繝ｳ逕ｻ髱｢')),
++               FilledButton.icon(
++                 onPressed: onAdd,
++                 icon: const Icon(Icons.add),
++                 label: const Text('繧ｵ繝悶せ繧ｯ繧定ｿｽ蜉'),
++               ),
++             ],
++           ),
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+          ],
+        ),
+      );
+    }
+  }
+  
+++<<<<<<< HEAD
+ +String _comma(int value) {
+ +  final negative = value < 0;
+ +  final digits = value.abs().toString();
+ +  final buffer = StringBuffer();
+ +  for (var i = 0; i < digits.length; i++) {
+ +    if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+ +    buffer.write(digits[i]);
+ +  }
+ +  return '${negative ? '-' : ''}$buffer';
+ +}
+ +
+++=======
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+  class _ExpenseHistoryPage extends StatelessWidget {
+    const _ExpenseHistoryPage({
+      required this.expenses,
+@@@ -2017,15 -1794,7 +2538,19 @@@ class _CategoryChip extends StatelessWi
+  
+    @override
+    Widget build(BuildContext context) {
+++<<<<<<< HEAD
+ +    return Container(
+ +      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+ +      decoration: BoxDecoration(
+ +        color: const Color(0xffedf7f1),
+ +        borderRadius: BorderRadius.circular(8),
+ +        border: Border.all(color: const Color(0xffcfe2d5)),
+ +      ),
+ +      child: Text('$label $amount蜀・),
+ +    );
+++=======
++     return const SizedBox();
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+    }
+  }
+  
+@@@ -2955,8 -2743,3 +3594,11 @@@ String formatDate(DateTime value) 
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(value.month)}/${two(value.day)} ${two(value.hour)}:${two(value.minute)}';
+  }
+++<<<<<<< HEAD
+ +
+ +String formatTime(DateTime value) {
+ +  String two(int n) => n.toString().padLeft(2, '0');
+ +  return '${two(value.hour)}:${two(value.minute)}';
+- }
+++}
+++=======
+++>>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a

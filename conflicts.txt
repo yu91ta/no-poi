@@ -1,0 +1,950 @@
+BLOCK 73-77
+73: <<<<<<< HEAD
+74:   int _monthlyBudget = 100000;
+75: =======
+76:   List<Subscription> _subscriptions = [];
+77: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 122-131
+122: <<<<<<< HEAD
+123:       _monthlyBudget = data['monthlyBudget'] as int? ?? 100000;
+124:       _doneMarkIds
+125:         ..clear()
+126:         ..addAll((data['doneMarkIds'] as List? ?? []).cast<String>());
+127: =======
+128:       _subscriptions = (data['subscriptions'] as List? ?? [])
+129:           .map((e) => Subscription.fromJson(e))
+130:           .toList();
+131: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 145-150
+145: <<<<<<< HEAD
+146:         'monthlyBudget': _monthlyBudget,
+147:         'doneMarkIds': _doneMarkIds.toList(),
+148: =======
+149:         'subscriptions': _subscriptions.map((e) => e.toJson()).toList(),
+150: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 226-230
+226: <<<<<<< HEAD
+227:       _monthlyBudget = 100000;
+228: =======
+229:       _subscriptions = [];
+230: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 296-560
+296: <<<<<<< HEAD
+297:   Future<void> _editBudget() async {
+298:     final controller = TextEditingController(text: _monthlyBudget.toString());
+299:     final result = await showDialog<int>(
+300:       context: context,
+301:       builder: (context) => AlertDialog(
+302:         title: const Text('今月の予算を設定'),
+303:         content: TextField(
+304:           controller: controller,
+305:           keyboardType: TextInputType.number,
+306:           autofocus: true,
+307:           decoration: const InputDecoration(
+308:             labelText: '予算（円）',
+309:             border: OutlineInputBorder(),
+310:           ),
+311:         ),
+312:         actions: [
+313:           TextButton(
+314:             onPressed: () => Navigator.of(context).pop(),
+315:             child: const Text('キャンセル'),
+316:           ),
+317:           FilledButton(
+318:             onPressed: () {
+319:               final value = int.tryParse(controller.text.trim());
+320:               Navigator.of(context).pop(value);
+321:             },
+322:             child: const Text('保存'),
+323:           ),
+324:         ],
+325:       ),
+326:     );
+327:     if (result != null && result >= 0) {
+328:       setState(() => _monthlyBudget = result);
+329:       await _save();
+330:     }
+331:   }
+332: 
+333:   Future<void> _toggleTaskChecked(NopoiTask task) async {
+334:     setState(() {
+335:       if (_doneMarkIds.contains(task.id)) {
+336:         _doneMarkIds.remove(task.id);
+337:       } else {
+338:         _doneMarkIds.add(task.id);
+339:       }
+340:     });
+341:     await _save();
+342: =======
+343:   Future<void> _recordDueSubscriptions() async {
+344:     final now = DateTime.now();
+345:     var changed = false;
+346:     final added = <Subscription>[];
+347:     setState(() {
+348:       for (var i = 0; i < _subscriptions.length; i++) {
+349:         final subscription = _subscriptions[i];
+350:         if (!subscription.isActive) continue;
+351:         var month = DateTime(
+352:           subscription.startMonth.year,
+353:           subscription.startMonth.month,
+354:         );
+355:         final currentMonth = DateTime(now.year, now.month);
+356:         var lastRecorded = subscription.lastRecordedYearMonth;
+357:         while (!month.isAfter(currentMonth)) {
+358:           final dueDate = subscription.billingDateFor(month.year, month.month);
+359:           final yearMonth = Subscription.yearMonth(month);
+360:           final alreadyRecorded = _expenses.any(
+361:             (item) =>
+362:                 item.subscriptionId == subscription.id &&
+363:                 Subscription.yearMonth(item.createdAt) == yearMonth,
+364:           );
+365:           if (!dueDate.isAfter(now) && !alreadyRecorded) {
+366:             _expenses.insert(
+367:               0,
+368:               ExpenseItem(
+369:                 id: 'subscription_${subscription.id}_$yearMonth',
+370:                 amount: subscription.amount,
+371:                 kind: subscription.category,
+372:                 title: subscription.name,
+373:                 sourceType: 'subscription',
+374:                 subscriptionId: subscription.id,
+375:                 createdAt: dueDate,
+376:               ),
+377:             );
+378:             lastRecorded = yearMonth;
+379:             changed = true;
+380:             added.add(subscription);
+381:           }
+382:           month = DateTime(month.year, month.month + 1);
+383:         }
+384:         if (lastRecorded != subscription.lastRecordedYearMonth) {
+385:           _subscriptions[i] = subscription.copyWith(
+386:             lastRecordedYearMonth: lastRecorded,
+387:           );
+388:           changed = true;
+389:         }
+390:       }
+391:     });
+392:     if (changed) await _save();
+393:     for (final subscription in added.where(
+394:       (item) => item.notificationEnabled,
+395:     )) {
+396:       await NotificationService.instance.showSubscriptionRecorded(subscription);
+397:     }
+398:   }
+399: 
+400:   Future<void> _saveSubscription(Subscription subscription) async {
+401:     setState(() {
+402:       final index = _subscriptions.indexWhere(
+403:         (item) => item.id == subscription.id,
+404:       );
+405:       if (index == -1) {
+406:         _subscriptions.insert(0, subscription);
+407:       } else {
+408:         _subscriptions[index] = subscription;
+409:       }
+410:     });
+411:     await _save();
+412:     await _recordDueSubscriptions();
+413:   }
+414: 
+415:   Future<void> _toggleSubscription(Subscription subscription) async {
+416:     await _saveSubscription(
+417:       subscription.copyWith(isActive: !subscription.isActive),
+418:     );
+419:   }
+420: 
+421:   Future<void> _deleteSubscription(Subscription subscription) async {
+422:     setState(
+423:       () => _subscriptions.removeWhere((item) => item.id == subscription.id),
+424:     );
+425:     await _save();
+426:   }
+427: 
+428:   Future<void> _showSubscriptionEditor([Subscription? existing]) async {
+429:     final name = TextEditingController(text: existing?.name ?? '');
+430:     final amount = TextEditingController(
+431:       text: existing?.amount.toString() ?? '',
+432:     );
+433:     final memo = TextEditingController(text: existing?.memo ?? '');
+434:     var billingDay = existing?.billingDay ?? DateTime.now().day;
+435:     var category = existing?.category ?? '娯楽';
+436:     var notificationEnabled = existing?.notificationEnabled ?? false;
+437:     var startMonth =
+438:         existing?.startMonth ??
+439:         DateTime(DateTime.now().year, DateTime.now().month);
+440:     final saved = await showDialog<bool>(
+441:       context: context,
+442:       builder: (context) => StatefulBuilder(
+443:         builder: (context, setDialogState) => AlertDialog(
+444:           title: Text(existing == null ? 'サブスクを追加' : 'サブスクを編集'),
+445:           content: SingleChildScrollView(
+446:             child: Column(
+447:               mainAxisSize: MainAxisSize.min,
+448:               children: [
+449:                 TextField(
+450:                   controller: name,
+451:                   decoration: const InputDecoration(labelText: 'サービス名'),
+452:                 ),
+453:                 TextField(
+454:                   controller: amount,
+455:                   keyboardType: TextInputType.number,
+456:                   decoration: const InputDecoration(labelText: '月額料金（円）'),
+457:                 ),
+458:                 const SizedBox(height: 8),
+459:                 DropdownButtonFormField<int>(
+460:                   initialValue: billingDay,
+461:                   decoration: const InputDecoration(labelText: '引き落とし日'),
+462:                   items: List.generate(
+463:                     31,
+464:                     (i) => DropdownMenuItem(
+465:                       value: i + 1,
+466:                       child: Text('毎月${i + 1}日'),
+467:                     ),
+468:                   ),
+469:                   onChanged: (value) =>
+470:                       setDialogState(() => billingDay = value!),
+471:                 ),
+472:                 DropdownButtonFormField<String>(
+473:                   initialValue: category,
+474:                   decoration: const InputDecoration(labelText: 'カテゴリ'),
+475:                   items:
+476:                       const ['食費', '交通費', '勉強', '遊び', '日用品', '娯楽', '生活費', 'その他']
+477:                           .map(
+478:                             (item) => DropdownMenuItem(
+479:                               value: item,
+480:                               child: Text(item),
+481:                             ),
+482:                           )
+483:                           .toList(),
+484:                   onChanged: (value) => setDialogState(() => category = value!),
+485:                 ),
+486:                 ListTile(
+487:                   contentPadding: EdgeInsets.zero,
+488:                   title: Text('開始月: ${startMonth.year}年${startMonth.month}月'),
+489:                   trailing: const Icon(Icons.calendar_month),
+490:                   onTap: () async {
+491:                     final selected = await showDatePicker(
+492:                       context: context,
+493:                       initialDate: startMonth,
+494:                       firstDate: DateTime(2020),
+495:                       lastDate: DateTime(2100),
+496:                     );
+497:                     if (selected != null)
+498:                       setDialogState(
+499:                         () => startMonth = DateTime(
+500:                           selected.year,
+501:                           selected.month,
+502:                         ),
+503:                       );
+504:                   },
+505:                 ),
+506:                 SwitchListTile(
+507:                   contentPadding: EdgeInsets.zero,
+508:                   title: const Text('自動登録時に通知'),
+509:                   value: notificationEnabled,
+510:                   onChanged: (value) =>
+511:                       setDialogState(() => notificationEnabled = value),
+512:                 ),
+513:                 TextField(
+514:                   controller: memo,
+515:                   maxLines: 2,
+516:                   decoration: const InputDecoration(labelText: 'メモ（任意）'),
+517:                 ),
+518:               ],
+519:             ),
+520:           ),
+521:           actions: [
+522:             TextButton(
+523:               onPressed: () => Navigator.pop(context),
+524:               child: const Text('キャンセル'),
+525:             ),
+526:             FilledButton(
+527:               onPressed: () {
+528:                 if (name.text.trim().isEmpty ||
+529:                     (int.tryParse(amount.text.trim()) ?? 0) < 1)
+530:                   return;
+531:                 Navigator.pop(context, true);
+532:               },
+533:               child: const Text('保存'),
+534:             ),
+535:           ],
+536:         ),
+537:       ),
+538:     );
+539:     if (saved == true) {
+540:       await _saveSubscription(
+541:         Subscription(
+542:           id: existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString(),
+543:           name: name.text.trim(),
+544:           amount: int.parse(amount.text.trim()),
+545:           billingDay: billingDay,
+546:           category: category,
+547:           memo: memo.text.trim(),
+548:           notificationEnabled: notificationEnabled,
+549:           startMonth: startMonth,
+550:           isActive: existing?.isActive ?? true,
+551:           lastRecordedYearMonth: existing?.lastRecordedYearMonth,
+552:           createdAt: existing?.createdAt ?? DateTime.now(),
+553:           updatedAt: DateTime.now(),
+554:         ),
+555:       );
+556:     }
+557:     name.dispose();
+558:     amount.dispose();
+559:     memo.dispose();
+560: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 705-710
+705: <<<<<<< HEAD
+706: =======
+707:           onExpenseHistory: () =>
+708:               setState(() => _page = AppPage.expenseHistory),
+709:           onSubscription: () => setState(() => _page = AppPage.subscription),
+710: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1172-1176
+1172: <<<<<<< HEAD
+1173: =======
+1174:     required this.onExpenseHistory,
+1175:     required this.onSubscription,
+1176: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1191-1195
+1191: <<<<<<< HEAD
+1192: =======
+1193:   final VoidCallback onExpenseHistory;
+1194:   final VoidCallback onSubscription;
+1195: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1353-1394
+1353: <<<<<<< HEAD
+1354: =======
+1355:       _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
+1356:       _MoneyPanel(
+1357:         expenses: expenses,
+1358:         poiCount: poiCount,
+1359:         onExpense: onExpense,
+1360:         onExpenseHistory: onExpenseHistory,
+1361:         onSubscription: onSubscription,
+1362:         onTask: onTask,
+1363:       ),
+1364:     ];
+1365:     return Padding(
+1366:       padding: const EdgeInsets.all(14),
+1367:       child: wide
+1368:           ? Row(
+1369:               crossAxisAlignment: CrossAxisAlignment.stretch,
+1370:               children: [
+1371:                 SizedBox(width: 330, child: content[0]),
+1372:                 const SizedBox(width: 14),
+1373:                 Expanded(child: content[1]),
+1374:                 const SizedBox(width: 14),
+1375:                 SizedBox(width: 270, child: content[2]),
+1376:               ],
+1377:             )
+1378:           : ListView(
+1379:               children: [
+1380:                 Padding(
+1381:                   padding: const EdgeInsets.only(bottom: 14),
+1382:                   child: SizedBox(height: 320, child: content[0]),
+1383:                 ),
+1384:                 Padding(
+1385:                   padding: const EdgeInsets.only(bottom: 14),
+1386:                   child: SizedBox(height: 470, child: content[1]),
+1387:                 ),
+1388:                 Padding(
+1389:                   padding: const EdgeInsets.only(bottom: 14),
+1390:                   child: SizedBox(height: 420, child: content[2]),
+1391:                 ),
+1392:               ],
+1393:             ),
+1394: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1651-1672
+1651: <<<<<<< HEAD
+1652: class _BalanceCard extends StatelessWidget {
+1653:   const _BalanceCard({required this.balance, required this.balanceDelta});
+1654:   final int balance;
+1655:   final int balanceDelta;
+1656: =======
+1657: class _MoneyPanel extends StatelessWidget {
+1658:   const _MoneyPanel({
+1659:     required this.expenses,
+1660:     required this.poiCount,
+1661:     required this.onExpense,
+1662:     required this.onExpenseHistory,
+1663:     required this.onSubscription,
+1664:     required this.onTask,
+1665:   });
+1666:   final List<ExpenseItem> expenses;
+1667:   final int poiCount;
+1668:   final VoidCallback onExpense;
+1669:   final VoidCallback onExpenseHistory;
+1670:   final VoidCallback onSubscription;
+1671:   final VoidCallback onTask;
+1672: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1686-1706
+1686: <<<<<<< HEAD
+1687:           const Row(
+1688: =======
+1689:           FilledButton(onPressed: onExpense, child: const Text('収支管理')),
+1690:           const SizedBox(height: 10),
+1691:           OutlinedButton.icon(
+1692:             onPressed: onSubscription,
+1693:             icon: const Icon(Icons.autorenew),
+1694:             label: const Text('サブスク管理'),
+1695:           ),
+1696:           const SizedBox(height: 10),
+1697:           OutlinedButton(onPressed: onTask, child: const Text('タスク追加')),
+1698:           const SizedBox(height: 12),
+1699:           _StatBox(
+1700:             label: '残高（収支）',
+1701:             value: formatSignedAmount(balance),
+1702:             valueColor: balanceColor,
+1703:           ),
+1704:           const SizedBox(height: 10),
+1705:           Row(
+1706: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1723-1780
+1723: <<<<<<< HEAD
+1724:           Container(
+1725:             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+1726:             decoration: BoxDecoration(
+1727:               color: const Color(0xffe9f7ef),
+1728:               borderRadius: BorderRadius.circular(20),
+1729:             ),
+1730:             child: Text(
+1731:               '前月比 ${formatSignedAmount(balanceDelta)} ${deltaUp ? '↗' : '↘'}',
+1732:               style: const TextStyle(
+1733:                 color: Color(0xff278554),
+1734:                 fontWeight: FontWeight.w700,
+1735:                 fontSize: 13,
+1736:               ),
+1737:             ),
+1738:           ),
+1739: =======
+1740:           if (expenses.isEmpty)
+1741:             const Text(
+1742:               '収支管理から記録できます。',
+1743:               style: TextStyle(color: Color(0xff6b7880)),
+1744:             )
+1745:           else
+1746:             ...expenses
+1747:                 .take(5)
+1748:                 .map(
+1749:                   (item) => Container(
+1750:                     margin: const EdgeInsets.only(bottom: 8),
+1751:                     padding: const EdgeInsets.all(10),
+1752:                     decoration: BoxDecoration(
+1753:                       color: Colors.white,
+1754:                       borderRadius: BorderRadius.circular(8),
+1755:                       border: Border.all(color: const Color(0xffd8e1e5)),
+1756:                     ),
+1757:                     child: Column(
+1758:                       crossAxisAlignment: CrossAxisAlignment.start,
+1759:                       children: [
+1760:                         Text(
+1761:                           '${item.isIncome ? '+' : '-'}${item.amount.abs()}円',
+1762:                           style: TextStyle(
+1763:                             fontWeight: FontWeight.w900,
+1764:                             color: item.isIncome
+1765:                                 ? const Color(0xff278554)
+1766:                                 : const Color(0xffc4565d),
+1767:                           ),
+1768:                         ),
+1769:                         Text(
+1770:                           '${item.title ?? item.kind} / ${formatDate(item.createdAt)}${item.sourceType == 'subscription' ? ' / サブスク' : ''}',
+1771:                           style: const TextStyle(
+1772:                             fontSize: 12,
+1773:                             color: Color(0xff6b7880),
+1774:                           ),
+1775:                         ),
+1776:                       ],
+1777:                     ),
+1778:                   ),
+1779:                 ),
+1780: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 1787-2219
+1787: <<<<<<< HEAD
+1788: class _BudgetStatusCard extends StatelessWidget {
+1789:   const _BudgetStatusCard({
+1790:     required this.incomeTotal,
+1791:     required this.expenseTotal,
+1792:     required this.balance,
+1793:   });
+1794:   final int incomeTotal;
+1795:   final int expenseTotal;
+1796:   final int balance;
+1797: 
+1798:   @override
+1799:   Widget build(BuildContext context) {
+1800:     return _CardShell(
+1801:       child: Column(
+1802:         crossAxisAlignment: CrossAxisAlignment.start,
+1803:         children: [
+1804:           const _CardHeader(
+1805:             icon: Icons.pie_chart,
+1806:             iconColor: Color(0xff3d6fb4),
+1807:             title: '収支の状況',
+1808:           ),
+1809:           const SizedBox(height: 14),
+1810:           _BudgetRow(label: '収入', value: '¥${_comma(incomeTotal)}'),
+1811:           const Padding(
+1812:             padding: EdgeInsets.symmetric(vertical: 8),
+1813:             child: Divider(height: 1, color: Color(0xffece3d1)),
+1814:           ),
+1815:           _BudgetRow(
+1816:             label: '支出',
+1817:             value: '¥${_comma(expenseTotal)}',
+1818:             valueColor: const Color(0xffc4565d),
+1819:           ),
+1820:           const Padding(
+1821:             padding: EdgeInsets.symmetric(vertical: 8),
+1822:             child: Divider(height: 1, color: Color(0xffece3d1)),
+1823:           ),
+1824:           _BudgetRow(
+1825:             label: '収支',
+1826:             value: '${balance >= 0 ? '+' : ''}¥${_comma(balance)}',
+1827:             valueColor: balance >= 0
+1828:                 ? const Color(0xff278554)
+1829:                 : const Color(0xffc4565d),
+1830:             bold: true,
+1831:           ),
+1832:         ],
+1833:       ),
+1834:     );
+1835:   }
+1836: }
+1837: 
+1838: class _BudgetRow extends StatelessWidget {
+1839:   const _BudgetRow({
+1840:     required this.label,
+1841:     required this.value,
+1842:     this.valueColor,
+1843:     this.bold = false,
+1844:   });
+1845:   final String label;
+1846:   final String value;
+1847:   final Color? valueColor;
+1848:   final bool bold;
+1849: 
+1850:   @override
+1851:   Widget build(BuildContext context) {
+1852:     return Row(
+1853:       children: [
+1854:         Text(
+1855:           label,
+1856:           style: const TextStyle(color: Color(0xff6b7880), fontSize: 13),
+1857:         ),
+1858:         const Spacer(),
+1859:         Flexible(
+1860:           child: Text(
+1861:             value,
+1862:             textAlign: TextAlign.right,
+1863:             overflow: TextOverflow.ellipsis,
+1864:             style: TextStyle(
+1865:               fontSize: 13,
+1866:               fontWeight: bold ? FontWeight.w900 : FontWeight.w700,
+1867:               color: valueColor ?? const Color(0xff3a3a3a),
+1868:             ),
+1869:           ),
+1870:         ),
+1871:       ],
+1872:     );
+1873:   }
+1874: }
+1875: 
+1876: class _TaskStatusCard extends StatelessWidget {
+1877:   const _TaskStatusCard({
+1878:     required this.undoneCount,
+1879:     required this.doneCount,
+1880:     required this.poiCount,
+1881:     required this.onTap,
+1882:   });
+1883:   final int undoneCount;
+1884:   final int doneCount;
+1885:   final int poiCount;
+1886:   final VoidCallback onTap;
+1887: 
+1888:   @override
+1889:   Widget build(BuildContext context) {
+1890:     return _CardShell(
+1891:       padding: const EdgeInsets.all(12),
+1892:       child: Column(
+1893:         crossAxisAlignment: CrossAxisAlignment.start,
+1894:         children: [
+1895:           const _CardHeader(
+1896:             icon: Icons.assignment_outlined,
+1897:             iconColor: Color(0xff5a9c73),
+1898:             title: 'タスクの状況',
+1899:             compact: true,
+1900:           ),
+1901:           const SizedBox(height: 10),
+1902:           _TaskStatusRow(label: '未完了', count: undoneCount, onTap: onTap),
+1903:           _TaskStatusRow(label: '完了', count: doneCount, onTap: onTap),
+1904:           _TaskStatusRow(label: 'Poiした数', count: poiCount, onTap: onTap),
+1905:         ],
+1906:       ),
+1907:     );
+1908:   }
+1909: }
+1910: 
+1911: class _TaskStatusRow extends StatelessWidget {
+1912:   const _TaskStatusRow({
+1913:     required this.label,
+1914:     required this.count,
+1915:     required this.onTap,
+1916:   });
+1917:   final String label;
+1918:   final int count;
+1919:   final VoidCallback onTap;
+1920: 
+1921:   @override
+1922:   Widget build(BuildContext context) {
+1923:     return InkWell(
+1924:       onTap: onTap,
+1925:       child: Padding(
+1926:         padding: const EdgeInsets.symmetric(vertical: 6),
+1927:         child: Row(
+1928:           children: [
+1929:             Text(
+1930:               label,
+1931:               style: const TextStyle(color: Color(0xff3a3a3a), fontSize: 13),
+1932:             ),
+1933:             const Spacer(),
+1934:             Text(
+1935:               '$count',
+1936:               style: const TextStyle(
+1937:                 fontWeight: FontWeight.w800,
+1938:                 fontSize: 13,
+1939:                 color: Color(0xff278554),
+1940:               ),
+1941:             ),
+1942:             const Icon(Icons.chevron_right, size: 18, color: Color(0xffb7c3c7)),
+1943:           ],
+1944:         ),
+1945:       ),
+1946:     );
+1947:   }
+1948: }
+1949: 
+1950: class _MonthlyScheduleCard extends StatelessWidget {
+1951:   const _MonthlyScheduleCard({required this.tasks, required this.onAdd});
+1952:   final List<NopoiTask> tasks;
+1953:   final VoidCallback onAdd;
+1954: 
+1955:   @override
+1956:   Widget build(BuildContext context) {
+1957:     return _CardShell(
+1958:       padding: const EdgeInsets.all(12),
+1959:       child: Column(
+1960:         crossAxisAlignment: CrossAxisAlignment.start,
+1961:         children: [
+1962:           const _CardHeader(
+1963:             icon: Icons.calendar_today,
+1964:             iconColor: Color(0xffe08a3e),
+1965:             title: '今月の予定',
+1966:             compact: true,
+1967:           ),
+1968:           const SizedBox(height: 10),
+1969:           if (tasks.isEmpty)
+1970:             const Padding(
+1971:               padding: EdgeInsets.symmetric(vertical: 8),
+1972:               child: Text(
+1973:                 '今月の予定はまだありません。',
+1974:                 style: TextStyle(color: Color(0xff6b7880), fontSize: 13),
+1975:               ),
+1976:             )
+1977:           else
+1978:             ...tasks.take(3).map(
+1979:               (task) => Padding(
+1980:                 padding: const EdgeInsets.symmetric(vertical: 6),
+1981:                 child: Row(
+1982:                   children: [
+1983:                     const Icon(
+1984:                       Icons.radio_button_unchecked,
+1985:                       size: 18,
+1986:                       color: Color(0xffc9c2ac),
+1987:                     ),
+1988:                     const SizedBox(width: 8),
+1989:                     Expanded(
+1990:                       child: Text(
+1991:                         task.text,
+1992:                         overflow: TextOverflow.ellipsis,
+1993:                         style: const TextStyle(fontSize: 13),
+1994:                       ),
+1995:                     ),
+1996:                     Text(
+1997:                       task.notifyAt == null ? '' : '${task.notifyAt!.day}日',
+1998:                       style: const TextStyle(
+1999:                         color: Color(0xff6b7880),
+2000:                         fontSize: 12,
+2001:                       ),
+2002:                     ),
+2003:                   ],
+2004:                 ),
+2005:               ),
+2006:             ),
+2007:           const SizedBox(height: 8),
+2008:           SizedBox(
+2009:             width: double.infinity,
+2010:             child: FilledButton.icon(
+2011:               style: FilledButton.styleFrom(
+2012:                 backgroundColor: const Color(0xfffbead1),
+2013:                 foregroundColor: const Color(0xff8a5a1e),
+2014:                 padding: const EdgeInsets.symmetric(vertical: 8),
+2015:                 textStyle: const TextStyle(fontSize: 13),
+2016:               ),
+2017:               onPressed: onAdd,
+2018:               icon: const Icon(Icons.add, size: 16),
+2019:               label: const Text('予定を追加'),
+2020:             ),
+2021:           ),
+2022:         ],
+2023:       ),
+2024:     );
+2025:   }
+2026: }
+2027: 
+2028: class _ExpenseManageCard extends StatelessWidget {
+2029:   const _ExpenseManageCard({
+2030:     required this.todayExpense,
+2031:     required this.monthExpense,
+2032:     required this.monthlyBudget,
+2033:     required this.onAdd,
+2034:     required this.onBudgetTap,
+2035:   });
+2036:   final int todayExpense;
+2037:   final int monthExpense;
+2038:   final int monthlyBudget;
+2039:   final VoidCallback onAdd;
+2040:   final VoidCallback onBudgetTap;
+2041: 
+2042:   @override
+2043:   Widget build(BuildContext context) {
+2044:     return _CardShell(
+2045:       padding: const EdgeInsets.all(12),
+2046:       child: Column(
+2047:         crossAxisAlignment: CrossAxisAlignment.start,
+2048:         children: [
+2049:           const _CardHeader(
+2050:             icon: Icons.account_balance_wallet_outlined,
+2051:             iconColor: Color(0xff3d6fb4),
+2052:             title: '支出管理',
+2053:             compact: true,
+2054:           ),
+2055:           const SizedBox(height: 10),
+2056:           _BudgetRow(label: '今日の支出', value: '¥${_comma(todayExpense)}'),
+2057:           const SizedBox(height: 6),
+2058:           _BudgetRow(label: '今月の支出', value: '¥${_comma(monthExpense)}'),
+2059:           const SizedBox(height: 6),
+2060:           InkWell(
+2061:             onTap: onBudgetTap,
+2062:             child: _BudgetRow(label: '今月の予算', value: '¥${_comma(monthlyBudget)}'),
+2063:           ),
+2064:           const SizedBox(height: 10),
+2065:           SizedBox(
+2066:             width: double.infinity,
+2067:             child: FilledButton.icon(
+2068:               style: FilledButton.styleFrom(
+2069:                 backgroundColor: const Color(0xffdcebfb),
+2070:                 foregroundColor: const Color(0xff2b5f96),
+2071:                 padding: const EdgeInsets.symmetric(vertical: 8),
+2072:                 textStyle: const TextStyle(fontSize: 13),
+2073:               ),
+2074:               onPressed: onAdd,
+2075:               icon: const Icon(Icons.add, size: 16),
+2076:               label: const Text('支出を追加'),
+2077:             ),
+2078:           ),
+2079: =======
+2080: class _SubscriptionPage extends StatelessWidget {
+2081:   const _SubscriptionPage({
+2082:     required this.subscriptions,
+2083:     required this.onHome,
+2084:     required this.onAdd,
+2085:     required this.onEdit,
+2086:     required this.onToggle,
+2087:     required this.onDelete,
+2088:   });
+2089:   final List<Subscription> subscriptions;
+2090:   final VoidCallback onHome;
+2091:   final VoidCallback onAdd;
+2092:   final ValueChanged<Subscription> onEdit;
+2093:   final ValueChanged<Subscription> onToggle;
+2094:   final ValueChanged<Subscription> onDelete;
+2095: 
+2096:   @override
+2097:   Widget build(BuildContext context) {
+2098:     return Padding(
+2099:       padding: const EdgeInsets.all(18),
+2100:       child: Column(
+2101:         children: [
+2102:           Expanded(
+2103:             child: _Panel(
+2104:               title: 'サブスク管理',
+2105:               child: subscriptions.isEmpty
+2106:                   ? const Text(
+2107:                       'サブスクを追加すると、指定日に支出へ自動記録します。',
+2108:                       style: TextStyle(color: Color(0xff6b7880)),
+2109:                     )
+2110:                   : ListView.separated(
+2111:                       padding: EdgeInsets.zero,
+2112:                       itemCount: subscriptions.length,
+2113:                       separatorBuilder: (_, _) => const SizedBox(height: 10),
+2114:                       itemBuilder: (context, index) {
+2115:                         final item = subscriptions[index];
+2116:                         return Container(
+2117:                           padding: const EdgeInsets.all(12),
+2118:                           decoration: BoxDecoration(
+2119:                             color: Colors.white,
+2120:                             borderRadius: BorderRadius.circular(8),
+2121:                             border: Border.all(color: const Color(0xffd8e1e5)),
+2122:                           ),
+2123:                           child: Column(
+2124:                             crossAxisAlignment: CrossAxisAlignment.start,
+2125:                             children: [
+2126:                               Row(
+2127:                                 children: [
+2128:                                   Expanded(
+2129:                                     child: Text(
+2130:                                       item.name,
+2131:                                       style: const TextStyle(
+2132:                                         fontSize: 18,
+2133:                                         fontWeight: FontWeight.w900,
+2134:                                       ),
+2135:                                     ),
+2136:                                   ),
+2137:                                   Chip(
+2138:                                     label: Text(item.isActive ? '有効' : '停止中'),
+2139:                                   ),
+2140:                                 ],
+2141:                               ),
+2142:                               Text('${item.amount}円 / 月　・　${item.category}'),
+2143:                               const SizedBox(height: 4),
+2144:                               Text(
+2145:                                 '次回: ${formatDate(item.nextBillingDate(DateTime.now()))}　通知: ${item.notificationEnabled ? 'ON' : 'OFF'}',
+2146:                                 style: const TextStyle(
+2147:                                   fontSize: 12,
+2148:                                   color: Color(0xff6b7880),
+2149:                                 ),
+2150:                               ),
+2151:                               if (item.memo.isNotEmpty)
+2152:                                 Text(
+2153:                                   item.memo,
+2154:                                   style: const TextStyle(
+2155:                                     fontSize: 12,
+2156:                                     color: Color(0xff6b7880),
+2157:                                   ),
+2158:                                 ),
+2159:                               const SizedBox(height: 8),
+2160:                               Wrap(
+2161:                                 spacing: 8,
+2162:                                 children: [
+2163:                                   OutlinedButton(
+2164:                                     onPressed: () => onEdit(item),
+2165:                                     child: const Text('編集'),
+2166:                                   ),
+2167:                                   OutlinedButton(
+2168:                                     onPressed: () => onToggle(item),
+2169:                                     child: Text(item.isActive ? '停止' : '再開'),
+2170:                                   ),
+2171:                                   TextButton(
+2172:                                     onPressed: () async {
+2173:                                       final ok = await showDialog<bool>(
+2174:                                         context: context,
+2175:                                         builder: (context) => AlertDialog(
+2176:                                           title: const Text('サブスクを削除しますか？'),
+2177:                                           content: const Text(
+2178:                                             '過去に記録された支出履歴は削除されません。',
+2179:                                           ),
+2180:                                           actions: [
+2181:                                             TextButton(
+2182:                                               onPressed: () =>
+2183:                                                   Navigator.pop(context),
+2184:                                               child: const Text('キャンセル'),
+2185:                                             ),
+2186:                                             FilledButton(
+2187:                                               onPressed: () =>
+2188:                                                   Navigator.pop(context, true),
+2189:                                               child: const Text('削除'),
+2190:                                             ),
+2191:                                           ],
+2192:                                         ),
+2193:                                       );
+2194:                                       if (ok == true) onDelete(item);
+2195:                                     },
+2196:                                     child: const Text('削除'),
+2197:                                   ),
+2198:                                 ],
+2199:                               ),
+2200:                             ],
+2201:                           ),
+2202:                         );
+2203:                       },
+2204:                     ),
+2205:             ),
+2206:           ),
+2207:           const SizedBox(height: 12),
+2208:           Wrap(
+2209:             spacing: 10,
+2210:             children: [
+2211:               OutlinedButton(onPressed: onHome, child: const Text('メイン画面')),
+2212:               FilledButton.icon(
+2213:                 onPressed: onAdd,
+2214:                 icon: const Icon(Icons.add),
+2215:                 label: const Text('サブスクを追加'),
+2216:               ),
+2217:             ],
+2218:           ),
+2219: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 2226-2239
+2226: <<<<<<< HEAD
+2227: String _comma(int value) {
+2228:   final negative = value < 0;
+2229:   final digits = value.abs().toString();
+2230:   final buffer = StringBuffer();
+2231:   for (var i = 0; i < digits.length; i++) {
+2232:     if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+2233:     buffer.write(digits[i]);
+2234:   }
+2235:   return '${negative ? '-' : ''}$buffer';
+2236: }
+2237: 
+2238: =======
+2239: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 2564-2576
+2564: <<<<<<< HEAD
+2565:     return Container(
+2566:       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+2567:       decoration: BoxDecoration(
+2568:         color: const Color(0xffedf7f1),
+2569:         borderRadius: BorderRadius.circular(8),
+2570:         border: Border.all(color: const Color(0xffcfe2d5)),
+2571:       ),
+2572:       child: Text('$label $amount円'),
+2573:     );
+2574: =======
+2575:     return const SizedBox();
+2576: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
+BLOCK 3620-3627
+3620: <<<<<<< HEAD
+3621: 
+3622: String formatTime(DateTime value) {
+3623:   String two(int n) => n.toString().padLeft(2, '0');
+3624:   return '${two(value.hour)}:${two(value.minute)}';
+3625: }
+3626: =======
+3627: >>>>>>> d215bc7d4d58264087038c95b3ffb1b506708e6a
+---
