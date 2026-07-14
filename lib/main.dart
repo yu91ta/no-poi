@@ -2,7 +2,9 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
@@ -46,7 +48,16 @@ class NoPoiApp extends StatelessWidget {
   }
 }
 
-enum AppPage { choice, task, expense, expenseHistory, subscription, home, poi }
+enum AppPage {
+  choice,
+  task,
+  expense,
+  expenseHistory,
+  subscription,
+  home,
+  poi,
+  todaySchedule,
+}
 
 class NoPoiHome extends StatefulWidget {
   const NoPoiHome({super.key});
@@ -667,6 +678,7 @@ class _NoPoiHomeState extends State<NoPoiHome> {
           onPoiList: () => setState(() => _page = AppPage.poi),
           onTaskCheck: _toggleTaskChecked,
           onEditBudget: _editBudget,
+          onTodaySchedule: () => setState(() => _page = AppPage.todaySchedule),
           trashKey: _trashKey,
         );
       case AppPage.poi:
@@ -679,7 +691,41 @@ class _NoPoiHomeState extends State<NoPoiHome> {
           onPoi: _poiTask,
           onDone: _doneTask,
         );
+      case AppPage.todaySchedule:
+        return _TodaySchedulePage(
+          tasks: _todayTasks(),
+          checkedIds: _doneMarkIds,
+          onTaskCheck: _toggleTaskChecked,
+          onPoi: _poiTask,
+          onDone: _doneTask,
+          onHome: () => setState(() => _page = AppPage.home),
+          onTask: () => setState(() => _page = AppPage.task),
+        );
     }
+  }
+
+  // 「今日の予定」一覧ページ用に、通知日時ありのタスクを優先して並べ、
+  // 今日が期限（または未設定）のタスクだけを抽出する。
+  List<NopoiTask> _todayTasks() {
+    final now = DateTime.now();
+    final sorted = [..._tasks]
+      ..sort((a, b) {
+        if (a.notifyAt == null && b.notifyAt == null) {
+          return a.createdAt.compareTo(b.createdAt);
+        }
+        if (a.notifyAt == null) return 1;
+        if (b.notifyAt == null) return -1;
+        return a.notifyAt!.compareTo(b.notifyAt!);
+      });
+    return sorted
+        .where(
+          (task) =>
+              task.notifyAt == null ||
+              (task.notifyAt!.year == now.year &&
+                  task.notifyAt!.month == now.month &&
+                  task.notifyAt!.day == now.day),
+        )
+        .toList();
   }
 
   String _riskText() {
@@ -691,7 +737,7 @@ class _NoPoiHomeState extends State<NoPoiHome> {
                 (task) => task.text.contains(text) || text.contains(task.text),
               )
               .length;
-    if (similar >= 2 || _poiTasks.length >= 10) {
+    if (similar >= 3 || _poiTasks.length >= 10) {
       return '危険度: 高 - 似たタスクがPoiされがちです。小さく分けると成功しやすいかも。';
     }
     if (similar == 1 || _poiTasks.length >= 5) {
@@ -1131,6 +1177,7 @@ class _MainPage extends StatefulWidget {
     required this.onPoiList,
     required this.onTaskCheck,
     required this.onEditBudget,
+    required this.onTodaySchedule,
     required this.trashKey,
   });
 
@@ -1151,6 +1198,7 @@ class _MainPage extends StatefulWidget {
   final VoidCallback onPoiList;
   final ValueChanged<NopoiTask> onTaskCheck;
   final VoidCallback onEditBudget;
+  final VoidCallback onTodaySchedule;
   final GlobalKey trashKey;
 
   @override
@@ -1215,6 +1263,7 @@ class _MainPageState extends State<_MainPage> {
     final onPoiList = widget.onPoiList;
     final onTaskCheck = widget.onTaskCheck;
     final onEditBudget = widget.onEditBudget;
+    final onTodaySchedule = widget.onTodaySchedule;
     final trashKey = widget.trashKey;
     final roomLitter = widget.roomLitter;
     final consumePendingDrops = widget.consumePendingDrops;
@@ -1305,7 +1354,7 @@ class _MainPageState extends State<_MainPage> {
           tasks: todayTasks,
           checkedIds: checkedIds,
           onTaskCheck: onTaskCheck,
-          onSeeAll: onTask,
+          onSeeAll: onTodaySchedule,
         ),
         const SizedBox(height: 14),
         room,
@@ -1362,6 +1411,9 @@ class _MainPageState extends State<_MainPage> {
         SizedBox(
           width: double.infinity,
           child: OutlinedButton.icon(
+             style: OutlinedButton.styleFrom(
+      backgroundColor: Colors.white,
+    ),
             onPressed: onSubscription,
             icon: const Icon(Icons.autorenew),
             label: const Text('サブスク管理'),
@@ -1664,6 +1716,8 @@ class _RoomPanelState extends State<_RoomPanel>
     });
     await _dropController.forward(from: 0);
     if (!mounted) return;
+    // 紙くずが実際にゴミ箱（または床）に落ちた瞬間に効果音を鳴らす。
+    unawaited(NotificationService.instance.playPoiSound());
     setState(() {
       _isDropping = false;
       if (isOverflow) _revealedFloorPapers++;
@@ -2930,6 +2984,132 @@ class _PoiPage extends StatelessWidget {
   }
 }
 
+class _TodaySchedulePage extends StatelessWidget {
+  const _TodaySchedulePage({
+    required this.tasks,
+    required this.checkedIds,
+    required this.onTaskCheck,
+    required this.onPoi,
+    required this.onDone,
+    required this.onHome,
+    required this.onTask,
+  });
+  final List<NopoiTask> tasks;
+  final Set<String> checkedIds;
+  final ValueChanged<NopoiTask> onTaskCheck;
+  final ValueChanged<NopoiTask> onPoi;
+  final ValueChanged<NopoiTask> onDone;
+  final VoidCallback onHome;
+  final VoidCallback onTask;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        children: [
+          Expanded(
+            child: _Panel(
+              title: '今日の予定',
+              child: tasks.isEmpty
+                  ? const Text(
+                      '今日の予定はありません。',
+                      style: TextStyle(color: Color(0xff6b7880)),
+                    )
+                  : ListView.separated(
+                      padding: EdgeInsets.zero,
+                      itemCount: tasks.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final task = tasks[index];
+                        final checked = checkedIds.contains(task.id);
+                        return Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xffd8e1e5)),
+                          ),
+                          child: Row(
+                            children: [
+                              InkWell(
+                                borderRadius: BorderRadius.circular(20),
+                                onTap: () => onTaskCheck(task),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: Icon(
+                                    checked
+                                        ? Icons.check_circle
+                                        : Icons.radio_button_unchecked,
+                                    color: checked
+                                        ? const Color(0xff278554)
+                                        : const Color(0xffc9c2ac),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      task.text,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        decoration: checked
+                                            ? TextDecoration.lineThrough
+                                            : null,
+                                        color: checked
+                                            ? const Color(0xff6b7880)
+                                            : null,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      checked
+                                          ? '完了'
+                                          : task.notifyAt == null
+                                          ? '時間未設定'
+                                          : '今日 ${formatTime(task.notifyAt!)}',
+                                      style: const TextStyle(
+                                        color: Color(0xff6b7880),
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              OutlinedButton(
+                                onPressed: () => onPoi(task),
+                                child: const Text('Poi'),
+                              ),
+                              const SizedBox(width: 8),
+                              FilledButton(
+                                onPressed: () => onDone(task),
+                                child: const Text('Done'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            children: [
+              OutlinedButton(onPressed: onHome, child: const Text('メイン画面')),
+              OutlinedButton(onPressed: onTask, child: const Text('タスク追加')),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _UndoneTaskPanel extends StatelessWidget {
   const _UndoneTaskPanel({
     required this.tasks,
@@ -3620,6 +3800,7 @@ class NotificationService {
   NotificationService._();
   static final instance = NotificationService._();
   final _plugin = FlutterLocalNotificationsPlugin();
+  final _poiPlayer = AudioPlayer();
 
   Future<void> init() async {
     tz_data.initializeTimeZones();
@@ -3669,6 +3850,19 @@ class NotificationService {
 
   Future<void> cancelTask(NopoiTask task) async {
     await _plugin.cancel(task.id.hashCode & 0x7fffffff);
+  }
+
+  /// タスクをPoi（ゴミ箱に投げ入れる）したときの効果音。
+  /// assets/sounds/poi.mp3（クシャッと丸めてゴミ箱にポトンと入る音）を再生する。
+  Future<void> playPoiSound() async {
+    try {
+      await _poiPlayer.stop();
+      await _poiPlayer.play(AssetSource('sounds/poi.mp3'));
+    } catch (_) {
+      // 端末側の音声再生に失敗しても操作自体は継続できるよう、
+      // 振動によるフィードバックだけは残す。
+    }
+    unawaited(HapticFeedback.mediumImpact());
   }
 
   Future<void> showSubscriptionRecorded(Subscription subscription) async {
