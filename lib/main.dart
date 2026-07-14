@@ -70,7 +70,10 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
   List<NopoiTask> _poiTasks = [];
   List<NopoiTask> _doneTasks = [];
   List<ExpenseItem> _expenses = [];
+  int _monthlyBudget = 100000;
   final Set<String> _checkedTaskIds = {};
+  // ホーム画面「今日の予定」でのチェック（Poi/Doneには影響しない軽量な完了マーク）。
+  final Set<String> _doneMarkIds = {};
   Offset? _paperStart;
   Offset? _paperEnd;
   late AnimationController _paperController;
@@ -112,6 +115,10 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       _expenses = (data['expenses'] as List? ?? [])
           .map((e) => ExpenseItem.fromJson(e))
           .toList();
+      _monthlyBudget = data['monthlyBudget'] as int? ?? 100000;
+      _doneMarkIds
+        ..clear()
+        ..addAll((data['doneMarkIds'] as List? ?? []).cast<String>());
     });
   }
 
@@ -124,6 +131,8 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
         'poiTasks': _poiTasks.map((e) => e.toJson()).toList(),
         'doneTasks': _doneTasks.map((e) => e.toJson()).toList(),
         'expenses': _expenses.map((e) => e.toJson()).toList(),
+        'monthlyBudget': _monthlyBudget,
+        'doneMarkIds': _doneMarkIds.toList(),
       }),
     );
   }
@@ -199,7 +208,9 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       _poiTasks = [];
       _doneTasks = [];
       _expenses = [];
+      _monthlyBudget = 100000;
       _checkedTaskIds.clear();
+      _doneMarkIds.clear();
       _notifyAt = null;
     });
     final prefs = await SharedPreferences.getInstance();
@@ -263,6 +274,53 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
     await _save();
   }
 
+  Future<void> _editBudget() async {
+    final controller = TextEditingController(text: _monthlyBudget.toString());
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('今月の予算を設定'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '予算（円）',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = int.tryParse(controller.text.trim());
+              Navigator.of(context).pop(value);
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && result >= 0) {
+      setState(() => _monthlyBudget = result);
+      await _save();
+    }
+  }
+
+  Future<void> _toggleTaskChecked(NopoiTask task) async {
+    setState(() {
+      if (_doneMarkIds.contains(task.id)) {
+        _doneMarkIds.remove(task.id);
+      } else {
+        _doneMarkIds.add(task.id);
+      }
+    });
+    await _save();
+  }
+
   Future<void> _poiTask(NopoiTask task) async {
     _setPaperFlight();
     await _paperController.forward(from: 0);
@@ -272,6 +330,7 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       _paperEnd = null;
       _tasks.removeWhere((item) => item.id == task.id);
       _poiTasks.insert(0, task.copyWith(movedAt: DateTime.now()));
+      _doneMarkIds.remove(task.id);
     });
     await NotificationService.instance.cancelTask(task);
     await _save();
@@ -284,6 +343,7 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
     setState(() {
       _tasks.removeWhere((item) => item.id == task.id);
       _checkedTaskIds.remove(task.id);
+      _doneMarkIds.remove(task.id);
       _doneTasks.insert(0, task.copyWith(movedAt: DateTime.now()));
     });
     await NotificationService.instance.cancelTask(task);
@@ -341,8 +401,19 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
           ],
         ),
       ),
+      bottomNavigationBar: _showsBottomNav
+          ? _BottomNav(
+              current: _page,
+              onSelect: (page) => setState(() => _page = page),
+            )
+          : null,
     );
   }
+
+  bool get _showsBottomNav =>
+      _page == AppPage.home ||
+      _page == AppPage.poi ||
+      _page == AppPage.expenseHistory;
 
   Widget _buildPage() {
     switch (_page) {
@@ -369,31 +440,36 @@ class _NoPoiHomeState extends State<NoPoiHome> with TickerProviderStateMixin {
       case AppPage.expenseHistory:
         return _ExpenseHistoryPage(
           expenses: _expenses,
+          monthlyBudget: _monthlyBudget,
           onHome: () => setState(() => _page = AppPage.home),
           onExpense: () => setState(() => _page = AppPage.expense),
+          onEditBudget: _editBudget,
         );
       case AppPage.home:
         return _MainPage(
           tasks: _tasks,
           expenses: _expenses,
           poiCount: _poiTasks.length,
-          checkedIds: _checkedTaskIds,
+          doneCount: _doneTasks.length,
+          checkedIds: _doneMarkIds,
+          monthlyBudget: _monthlyBudget,
           onExpense: () => setState(() => _page = AppPage.expense),
-          onExpenseHistory: () =>
-              setState(() => _page = AppPage.expenseHistory),
           onTask: () => setState(() => _page = AppPage.task),
           onPoiList: () => setState(() => _page = AppPage.poi),
-          onPoi: _poiTask,
-          onDone: _doneTask,
+          onTaskCheck: _toggleTaskChecked,
+          onEditBudget: _editBudget,
           trashKey: _trashKey,
-          paperKey: _paperKey,
         );
       case AppPage.poi:
         return _PoiPage(
+          tasks: _tasks,
           poiTasks: _poiTasks,
           doneTasks: _doneTasks,
           onHome: () => setState(() => _page = AppPage.home),
           onTask: () => setState(() => _page = AppPage.task),
+          onPoi: _poiTask,
+          onDone: _doneTask,
+          paperKey: _paperKey,
         );
     }
   }
@@ -447,6 +523,89 @@ class _Header extends StatelessWidget {
             ),
           ),
           OutlinedButton(onPressed: onChoice, child: const Text('選択画面')),
+        ],
+      ),
+    );
+  }
+}
+
+class _BottomNav extends StatelessWidget {
+  const _BottomNav({required this.current, required this.onSelect});
+  final AppPage current;
+  final ValueChanged<AppPage> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xfffffdf8),
+        border: Border(top: BorderSide(color: Color(0xffece3d1))),
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: _BottomNavItem(
+              icon: Icons.home_rounded,
+              label: 'ホーム',
+              selected: current == AppPage.home,
+              onTap: () => onSelect(AppPage.home),
+            ),
+          ),
+          Expanded(
+            child: _BottomNavItem(
+              icon: Icons.assignment_outlined,
+              label: 'タスク',
+              selected: current == AppPage.poi,
+              onTap: () => onSelect(AppPage.poi),
+            ),
+          ),
+          Expanded(
+            child: _BottomNavItem(
+              icon: Icons.account_balance_wallet_outlined,
+              label: '支出管理',
+              selected: current == AppPage.expenseHistory,
+              onTap: () => onSelect(AppPage.expenseHistory),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BottomNavItem extends StatelessWidget {
+  const _BottomNavItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected
+        ? const Color(0xff278554)
+        : const Color(0xff9aa39d);
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 24),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+            ),
+          ),
         ],
       ),
     );
@@ -652,7 +811,7 @@ class _ExpensePage extends StatelessWidget {
           keyboardType: const TextInputType.numberWithOptions(signed: true),
           decoration: const InputDecoration(
             labelText: '金額',
-            helperText: '金額は正の数で入力してください',
+            helperText: '金額は正の数で入力してください（内容で収入/支出を判定します）',
             border: OutlineInputBorder(),
           ),
         ),
@@ -742,183 +901,371 @@ class _MainPage extends StatelessWidget {
     required this.tasks,
     required this.expenses,
     required this.poiCount,
+    required this.doneCount,
     required this.checkedIds,
+    required this.monthlyBudget,
     required this.onExpense,
-    required this.onExpenseHistory,
     required this.onTask,
     required this.onPoiList,
-    required this.onPoi,
-    required this.onDone,
+    required this.onTaskCheck,
+    required this.onEditBudget,
     required this.trashKey,
-    required this.paperKey,
   });
 
   final List<NopoiTask> tasks;
   final List<ExpenseItem> expenses;
   final int poiCount;
+  final int doneCount;
   final Set<String> checkedIds;
+  final int monthlyBudget;
   final VoidCallback onExpense;
-  final VoidCallback onExpenseHistory;
   final VoidCallback onTask;
   final VoidCallback onPoiList;
-  final ValueChanged<NopoiTask> onPoi;
-  final ValueChanged<NopoiTask> onDone;
+  final ValueChanged<NopoiTask> onTaskCheck;
+  final VoidCallback onEditBudget;
   final GlobalKey trashKey;
-  final GlobalKey paperKey;
 
   @override
   Widget build(BuildContext context) {
-    final wide = MediaQuery.of(context).size.width > 900;
-    final content = [
-      _TaskPanel(
-        tasks: tasks,
-        checkedIds: checkedIds,
-        onPoi: onPoi,
-        onDone: onDone,
-        paperKey: paperKey,
+    final now = DateTime.now();
+
+    // 通知日時ありのタスクを優先し、通知日時なしのタスクは末尾に回す。
+    final sortedTasks = [...tasks]
+      ..sort((a, b) {
+        if (a.notifyAt == null && b.notifyAt == null) {
+          return a.createdAt.compareTo(b.createdAt);
+        }
+        if (a.notifyAt == null) return 1;
+        if (b.notifyAt == null) return -1;
+        return a.notifyAt!.compareTo(b.notifyAt!);
+      });
+
+    final todayTasks = sortedTasks
+        .where(
+          (task) =>
+              task.notifyAt == null ||
+              (task.notifyAt!.year == now.year &&
+                  task.notifyAt!.month == now.month &&
+                  task.notifyAt!.day == now.day),
+        )
+        .toList();
+
+    final monthTasks = sortedTasks
+        .where(
+          (task) =>
+              task.notifyAt != null &&
+              task.notifyAt!.year == now.year &&
+              task.notifyAt!.month == now.month,
+        )
+        .toList();
+
+    final incomeTotal = expenses
+        .where((item) => item.isIncome)
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+    final expenseTotal = expenses
+        .where((item) => !item.isIncome)
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+    final balance = incomeTotal - expenseTotal;
+
+    final summaries = buildMonthlyExpenseSummaries(expenses);
+    final currentSummary = summaries.isNotEmpty ? summaries.first : null;
+    final balanceDelta = currentSummary?.balanceDelta ?? 0;
+
+    final todayExpense = expenses
+        .where(
+          (item) =>
+              !item.isIncome &&
+              item.createdAt.year == now.year &&
+              item.createdAt.month == now.month &&
+              item.createdAt.day == now.day,
+        )
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+
+    final monthExpense = expenses
+        .where(
+          (item) =>
+              !item.isIncome &&
+              item.createdAt.year == now.year &&
+              item.createdAt.month == now.month,
+        )
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+
+    // 画像本来の比率のまま表示する。画面全体の背景（壁色→床色の
+    // グラデーション）と地続きに見せるため、ここでは余白を作らない。
+    final room = AspectRatio(
+      aspectRatio: 700 / 389,
+      child: _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
+    );
+
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _TodayScheduleCard(
+          tasks: todayTasks,
+          checkedIds: checkedIds,
+          onTaskCheck: onTaskCheck,
+          onSeeAll: onTask,
+        ),
+        const SizedBox(height: 14),
+        room,
+        const SizedBox(height: 14),
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: _BalanceCard(balance: balance, balanceDelta: balanceDelta),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _BudgetStatusCard(
+                  incomeTotal: incomeTotal,
+                  expenseTotal: expenseTotal,
+                  balance: balance,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: _TaskStatusCard(
+                  undoneCount: tasks.length,
+                  doneCount: doneCount,
+                  poiCount: poiCount,
+                  onTap: onPoiList,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _MonthlyScheduleCard(tasks: monthTasks, onAdd: onTask),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _ExpenseManageCard(
+                  todayExpense: todayExpense,
+                  monthExpense: monthExpense,
+                  monthlyBudget: monthlyBudget,
+                  onAdd: onExpense,
+                  onBudgetTap: onEditBudget,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    return SingleChildScrollView(
+      child: Container(
+        width: double.infinity,
+        // 画面全体の背景を壁色→床色のグラデーションにし、
+        // ウサギの部屋のイラストと地続きに見えるようにする。
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xffd8e9f3), Color(0xfff7e8d0)],
+            stops: [0.39, 0.39],
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+        child: content,
       ),
-      _RoomPanel(poiCount: poiCount, onPoiList: onPoiList, trashKey: trashKey),
-      _MoneyPanel(
-        expenses: expenses,
-        poiCount: poiCount,
-        onExpense: onExpense,
-        onExpenseHistory: onExpenseHistory,
-        onTask: onTask,
-      ),
-    ];
-    return Padding(
-      padding: const EdgeInsets.all(14),
-      child: wide
-          ? Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                SizedBox(width: 330, child: content[0]),
-                const SizedBox(width: 14),
-                Expanded(child: content[1]),
-                const SizedBox(width: 14),
-                SizedBox(width: 270, child: content[2]),
-              ],
-            )
-          : ListView(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 14),
-                  child: SizedBox(height: 320, child: content[0]),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 14),
-                  child: SizedBox(height: 470, child: content[1]),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 14),
-                  child: SizedBox(height: 420, child: content[2]),
-                ),
-              ],
-            ),
     );
   }
 }
 
-class _TaskPanel extends StatelessWidget {
-  const _TaskPanel({
-    required this.tasks,
-    required this.checkedIds,
-    required this.onPoi,
-    required this.onDone,
-    required this.paperKey,
+class _CardShell extends StatelessWidget {
+  const _CardShell({
+    required this.child,
+    this.padding = const EdgeInsets.all(16),
   });
-  final List<NopoiTask> tasks;
-  final Set<String> checkedIds;
-  final ValueChanged<NopoiTask> onPoi;
-  final ValueChanged<NopoiTask> onDone;
-  final GlobalKey paperKey;
+  final Widget child;
+  final EdgeInsets padding;
 
   @override
   Widget build(BuildContext context) {
-    return _Panel(
-      title: 'Task',
-      child: tasks.isEmpty
-          ? const Text(
-              'まだタスクがありません。',
-              style: TextStyle(color: Color(0xff6b7880)),
-            )
-          : ListView.separated(
-              itemCount: tasks.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 10),
-              itemBuilder: (context, index) {
-                final task = tasks[index];
-                final checked = checkedIds.contains(task.id);
-                return Container(
-                  key: index == 0 ? paperKey : null,
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xffd8e1e5)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 200),
-                            child: checked
-                                ? const Icon(
-                                    Icons.check_box,
-                                    key: ValueKey('checked'),
-                                    color: Color(0xff278554),
-                                  )
-                                : const Icon(
-                                    Icons.check_box_outline_blank,
-                                    key: ValueKey('blank'),
-                                    color: Color(0xffb7c3c7),
-                                  ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              task.text,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        task.notifyAt == null
-                            ? '通知: 未設定'
-                            : '通知: ${formatDate(task.notifyAt!)}',
-                        style: const TextStyle(
-                          color: Color(0xff6b7880),
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton(
-                              onPressed: () => onPoi(task),
-                              child: const Text('Poi'),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: FilledButton(
-                              onPressed: () => onDone(task),
-                              child: const Text('Done'),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                );
-              },
+    return Container(
+      width: double.infinity,
+      padding: padding,
+      decoration: BoxDecoration(
+        color: const Color(0xfffffdf8),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xffece3d1)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: .04),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+}
+
+class _CardHeader extends StatelessWidget {
+  const _CardHeader({
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    this.titleColor,
+    this.onSeeAll,
+    this.compact = false,
+  });
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final Color? titleColor;
+  final VoidCallback? onSeeAll;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, color: iconColor, size: compact ? 18 : 22),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            title,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: compact ? 14 : 18,
+              fontWeight: FontWeight.w800,
+              color: titleColor ?? const Color(0xff3a3a3a),
             ),
+          ),
+        ),
+        if (onSeeAll != null)
+          InkWell(
+            onTap: onSeeAll,
+            child: Row(
+              children: [
+                Text(
+                  'すべて見る',
+                  style: TextStyle(
+                    color: iconColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                Icon(Icons.chevron_right, color: iconColor, size: 18),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _TodayScheduleCard extends StatelessWidget {
+  const _TodayScheduleCard({
+    required this.tasks,
+    required this.checkedIds,
+    required this.onTaskCheck,
+    required this.onSeeAll,
+  });
+  final List<NopoiTask> tasks;
+  final Set<String> checkedIds;
+  final ValueChanged<NopoiTask> onTaskCheck;
+  final VoidCallback onSeeAll;
+
+  @override
+  Widget build(BuildContext context) {
+    return _CardShell(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _CardHeader(
+            icon: Icons.event_note,
+            iconColor: const Color(0xffe08a3e),
+            title: '今日の予定',
+            onSeeAll: onSeeAll,
+          ),
+          const SizedBox(height: 12),
+          const Divider(height: 1, color: Color(0xffece3d1)),
+          const SizedBox(height: 12),
+          if (tasks.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '今日の予定はありません。',
+                style: TextStyle(color: Color(0xff6b7880)),
+              ),
+            )
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: tasks
+                  .take(3)
+                  .map(
+                    (task) => Expanded(
+                      child: _TodayTaskTile(
+                        task: task,
+                        checked: checkedIds.contains(task.id),
+                        onTap: () => onTaskCheck(task),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TodayTaskTile extends StatelessWidget {
+  const _TodayTaskTile({
+    required this.task,
+    required this.checked,
+    required this.onTap,
+  });
+  final NopoiTask task;
+  final bool checked;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              checked ? Icons.check_circle : Icons.radio_button_unchecked,
+              color: checked
+                  ? const Color(0xff278554)
+                  : const Color(0xffc9c2ac),
+              size: 22,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              task.text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              checked
+                  ? '完了'
+                  : task.notifyAt == null
+                  ? '時間未設定'
+                  : '今日 ${formatTime(task.notifyAt!)}',
+              style: const TextStyle(fontSize: 12, color: Color(0xff6b7880)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -935,187 +1282,467 @@ class _RoomPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Stack(
-        children: [
-          Positioned.fill(child: CustomPaint(painter: RoomPainter(poiCount))),
-          Align(
-            alignment: const Alignment(.05, .55),
-            child: CustomPaint(
-              size: const Size(170, 210),
-              painter: RabbitPainter(),
-            ),
-          ),
-          Positioned(
-            right: 34,
-            bottom: 52,
-            child: GestureDetector(
-              key: trashKey,
-              onTap: onPoiList,
-              child: CustomPaint(
-                size: const Size(138, 132),
-                painter: TrashCanPainter(),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final height = constraints.maxHeight;
+        // BoxFit.contain 後に実際に画像が描画される矩形を計算する。
+        const imageAspect = 1537 / 1023;
+        final containerAspect = width / height;
+        double imageW;
+        double imageH;
+        if (containerAspect > imageAspect) {
+          // コンテナの方が横長 → 高さいっぱいに合わせ、左右に余白。
+          imageH = height;
+          imageW = height * imageAspect;
+        } else {
+          // コンテナの方が縦長 → 幅いっぱいに合わせ、上下に余白。
+          imageW = width;
+          imageH = width / imageAspect;
+        }
+        final imageLeft = (width - imageW) / 2;
+        final imageTop = (height - imageH) / 2;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: Image.asset(
+                'assets/images/room.png',
+                fit: BoxFit.contain,
+                gaplessPlayback: true,
+                filterQuality: FilterQuality.high,
               ),
             ),
-          ),
-        ],
-      ),
+            // イラスト内のゴミ箱の位置に合わせた透明なタップ領域
+            // （画像の実描画矩形を基準に計算する）。
+            Positioned(
+              key: trashKey,
+              left: imageLeft + imageW * .742,
+              top: imageTop + imageH * .552,
+              width: imageW * (.852 - .742),
+              height: imageH * (.777 - .552),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onPoiList,
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
 
-class _MoneyPanel extends StatelessWidget {
-  const _MoneyPanel({
-    required this.expenses,
-    required this.poiCount,
-    required this.onExpense,
-    required this.onExpenseHistory,
-    required this.onTask,
-  });
-  final List<ExpenseItem> expenses;
-  final int poiCount;
-  final VoidCallback onExpense;
-  final VoidCallback onExpenseHistory;
-  final VoidCallback onTask;
+class _BalanceCard extends StatelessWidget {
+  const _BalanceCard({required this.balance, required this.balanceDelta});
+  final int balance;
+  final int balanceDelta;
 
   @override
   Widget build(BuildContext context) {
-    final incomeTotal = expenses
-        .where((item) => item.isIncome)
-        .fold<int>(0, (sum, item) => sum + item.amount.abs());
-    final expenseTotal = expenses
-        .where((item) => !item.isIncome)
-        .fold<int>(0, (sum, item) => sum + item.amount.abs());
-    final balance = incomeTotal - expenseTotal;
     final balanceColor = balance > 0
         ? const Color(0xff278554)
         : balance < 0
         ? const Color(0xffc4565d)
         : const Color(0xff6b7880);
-    return _Panel(
-      title: '',
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(8, 0, 2, 0),
+    final deltaUp = balanceDelta >= 0;
+    return _CardShell(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          FilledButton(onPressed: onExpense, child: const Text('収支管理')),
-          const SizedBox(height: 10),
-          OutlinedButton(onPressed: onTask, child: const Text('タスク追加')),
-          const SizedBox(height: 12),
-          _StatBox(
-            label: '残高（収支）',
-            value: formatSignedAmount(balance),
-            valueColor: balanceColor,
-          ),
-          const SizedBox(height: 10),
-          Row(
+          const Row(
             children: [
-              Expanded(
-                child: _StatBox(
-                  label: '収入合計',
-                  value: '$incomeTotal円',
-                  valueColor: const Color(0xff278554),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _StatBox(
-                  label: '支出合計',
-                  value: '$expenseTotal円',
-                  valueColor: const Color(0xffc4565d),
-                ),
-              ),
+              Text('残高', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+              SizedBox(width: 4),
+              Text('🌱', style: TextStyle(fontSize: 15)),
             ],
           ),
           const SizedBox(height: 10),
-          _StatBox(label: 'Poiされた数', value: '$poiCount'),
-          const SizedBox(height: 16),
-          Padding(
-            padding: const EdgeInsets.only(left: 8),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '最近の収支',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      fontFamily: 'Roboto',
-                    ),
-                  ),
-                ),
-                OutlinedButton(
-                  onPressed: onExpenseHistory,
-                  child: const Text('収支履歴'),
-                ),
-              ],
+          Text(
+            '¥${_comma(balance)}',
+            style: TextStyle(
+              fontSize: 34,
+              fontWeight: FontWeight.w900,
+              color: balanceColor,
             ),
           ),
           const SizedBox(height: 10),
-          if (expenses.isEmpty)
-            const Text(
-              '収支管理から記録できます。',
-              style: TextStyle(color: Color(0xff6b7880)),
-            )
-          else
-            ...expenses
-                .take(5)
-                .map(
-                  (item) => Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xffd8e1e5)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '${item.isIncome ? '+' : '-'}${item.amount.abs()}円',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w900,
-                            color: item.isIncome
-                                ? const Color(0xff278554)
-                                : const Color(0xffc4565d),
-                          ),
-                        ),
-                        Text(
-                          '${item.kind} / ${formatDate(item.createdAt)}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xff6b7880),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: const Color(0xffe9f7ef),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              '前月比 ${formatSignedAmount(balanceDelta)} ${deltaUp ? '↗' : '↘'}',
+              style: const TextStyle(
+                color: Color(0xff278554),
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
+class _BudgetStatusCard extends StatelessWidget {
+  const _BudgetStatusCard({
+    required this.incomeTotal,
+    required this.expenseTotal,
+    required this.balance,
+  });
+  final int incomeTotal;
+  final int expenseTotal;
+  final int balance;
+
+  @override
+  Widget build(BuildContext context) {
+    return _CardShell(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _CardHeader(
+            icon: Icons.pie_chart,
+            iconColor: Color(0xff3d6fb4),
+            title: '収支の状況',
+          ),
+          const SizedBox(height: 14),
+          _BudgetRow(label: '収入', value: '¥${_comma(incomeTotal)}'),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Divider(height: 1, color: Color(0xffece3d1)),
+          ),
+          _BudgetRow(
+            label: '支出',
+            value: '¥${_comma(expenseTotal)}',
+            valueColor: const Color(0xffc4565d),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Divider(height: 1, color: Color(0xffece3d1)),
+          ),
+          _BudgetRow(
+            label: '収支',
+            value: '${balance >= 0 ? '+' : ''}¥${_comma(balance)}',
+            valueColor: balance >= 0
+                ? const Color(0xff278554)
+                : const Color(0xffc4565d),
+            bold: true,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BudgetRow extends StatelessWidget {
+  const _BudgetRow({
+    required this.label,
+    required this.value,
+    this.valueColor,
+    this.bold = false,
+  });
+  final String label;
+  final String value;
+  final Color? valueColor;
+  final bool bold;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Color(0xff6b7880), fontSize: 13),
+        ),
+        const Spacer(),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: bold ? FontWeight.w900 : FontWeight.w700,
+              color: valueColor ?? const Color(0xff3a3a3a),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TaskStatusCard extends StatelessWidget {
+  const _TaskStatusCard({
+    required this.undoneCount,
+    required this.doneCount,
+    required this.poiCount,
+    required this.onTap,
+  });
+  final int undoneCount;
+  final int doneCount;
+  final int poiCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return _CardShell(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _CardHeader(
+            icon: Icons.assignment_outlined,
+            iconColor: Color(0xff5a9c73),
+            title: 'タスクの状況',
+            compact: true,
+          ),
+          const SizedBox(height: 10),
+          _TaskStatusRow(label: '未完了', count: undoneCount, onTap: onTap),
+          _TaskStatusRow(label: '完了', count: doneCount, onTap: onTap),
+          _TaskStatusRow(label: 'Poiした数', count: poiCount, onTap: onTap),
+        ],
+      ),
+    );
+  }
+}
+
+class _TaskStatusRow extends StatelessWidget {
+  const _TaskStatusRow({
+    required this.label,
+    required this.count,
+    required this.onTap,
+  });
+  final String label;
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Text(
+              label,
+              style: const TextStyle(color: Color(0xff3a3a3a), fontSize: 13),
+            ),
+            const Spacer(),
+            Text(
+              '$count',
+              style: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+                color: Color(0xff278554),
+              ),
+            ),
+            const Icon(Icons.chevron_right, size: 18, color: Color(0xffb7c3c7)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MonthlyScheduleCard extends StatelessWidget {
+  const _MonthlyScheduleCard({required this.tasks, required this.onAdd});
+  final List<NopoiTask> tasks;
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    return _CardShell(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _CardHeader(
+            icon: Icons.calendar_today,
+            iconColor: Color(0xffe08a3e),
+            title: '今月の予定',
+            compact: true,
+          ),
+          const SizedBox(height: 10),
+          if (tasks.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '今月の予定はまだありません。',
+                style: TextStyle(color: Color(0xff6b7880), fontSize: 13),
+              ),
+            )
+          else
+            ...tasks.take(3).map(
+              (task) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.radio_button_unchecked,
+                      size: 18,
+                      color: Color(0xffc9c2ac),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        task.text,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                    ),
+                    Text(
+                      task.notifyAt == null ? '' : '${task.notifyAt!.day}日',
+                      style: const TextStyle(
+                        color: Color(0xff6b7880),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xfffbead1),
+                foregroundColor: const Color(0xff8a5a1e),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                textStyle: const TextStyle(fontSize: 13),
+              ),
+              onPressed: onAdd,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('予定を追加'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExpenseManageCard extends StatelessWidget {
+  const _ExpenseManageCard({
+    required this.todayExpense,
+    required this.monthExpense,
+    required this.monthlyBudget,
+    required this.onAdd,
+    required this.onBudgetTap,
+  });
+  final int todayExpense;
+  final int monthExpense;
+  final int monthlyBudget;
+  final VoidCallback onAdd;
+  final VoidCallback onBudgetTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return _CardShell(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _CardHeader(
+            icon: Icons.account_balance_wallet_outlined,
+            iconColor: Color(0xff3d6fb4),
+            title: '支出管理',
+            compact: true,
+          ),
+          const SizedBox(height: 10),
+          _BudgetRow(label: '今日の支出', value: '¥${_comma(todayExpense)}'),
+          const SizedBox(height: 6),
+          _BudgetRow(label: '今月の支出', value: '¥${_comma(monthExpense)}'),
+          const SizedBox(height: 6),
+          InkWell(
+            onTap: onBudgetTap,
+            child: _BudgetRow(label: '今月の予算', value: '¥${_comma(monthlyBudget)}'),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xffdcebfb),
+                foregroundColor: const Color(0xff2b5f96),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                textStyle: const TextStyle(fontSize: 13),
+              ),
+              onPressed: onAdd,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('支出を追加'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _comma(int value) {
+  final negative = value < 0;
+  final digits = value.abs().toString();
+  final buffer = StringBuffer();
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+    buffer.write(digits[i]);
+  }
+  return '${negative ? '-' : ''}$buffer';
+}
+
 class _ExpenseHistoryPage extends StatelessWidget {
   const _ExpenseHistoryPage({
     required this.expenses,
+    required this.monthlyBudget,
     required this.onHome,
     required this.onExpense,
+    required this.onEditBudget,
   });
 
   final List<ExpenseItem> expenses;
+  final int monthlyBudget;
   final VoidCallback onHome;
   final VoidCallback onExpense;
+  final VoidCallback onEditBudget;
 
   @override
   Widget build(BuildContext context) {
     final summaries = buildMonthlyExpenseSummaries(expenses);
+    final now = DateTime.now();
+    final todayExpense = expenses
+        .where(
+          (item) =>
+              !item.isIncome &&
+              item.createdAt.year == now.year &&
+              item.createdAt.month == now.month &&
+              item.createdAt.day == now.day,
+        )
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
+    final monthExpense = expenses
+        .where(
+          (item) =>
+              !item.isIncome &&
+              item.createdAt.year == now.year &&
+              item.createdAt.month == now.month,
+        )
+        .fold<int>(0, (sum, item) => sum + item.amount.abs());
     return Padding(
       padding: const EdgeInsets.all(18),
       child: Column(
         children: [
+          _ExpenseManageCard(
+            todayExpense: todayExpense,
+            monthExpense: monthExpense,
+            monthlyBudget: monthlyBudget,
+            onAdd: onExpense,
+            onBudgetTap: onEditBudget,
+          ),
+          const SizedBox(height: 14),
           Expanded(
             child: _Panel(
               title: '収支履歴',
@@ -1389,9 +2016,17 @@ class _CategoryChip extends StatelessWidget {
   final int amount;
 
   @override
-Widget build(BuildContext context) {
-  return const SizedBox();
-}
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xffedf7f1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xffcfe2d5)),
+      ),
+      child: Text('$label $amount円'),
+    );
+  }
 }
 
 class MonthlyExpenseSummary {
@@ -1586,15 +2221,23 @@ class _LegendItem extends StatelessWidget {
 
 class _PoiPage extends StatelessWidget {
   const _PoiPage({
+    required this.tasks,
     required this.poiTasks,
     required this.doneTasks,
     required this.onHome,
     required this.onTask,
+    required this.onPoi,
+    required this.onDone,
+    required this.paperKey,
   });
+  final List<NopoiTask> tasks;
   final List<NopoiTask> poiTasks;
   final List<NopoiTask> doneTasks;
   final VoidCallback onHome;
   final VoidCallback onTask;
+  final ValueChanged<NopoiTask> onPoi;
+  final ValueChanged<NopoiTask> onDone;
+  final GlobalKey paperKey;
 
   @override
   Widget build(BuildContext context) {
@@ -1617,6 +2260,16 @@ class _PoiPage extends StatelessWidget {
       padding: const EdgeInsets.all(18),
       child: Column(
         children: [
+          SizedBox(
+            height: 320,
+            child: _UndoneTaskPanel(
+              tasks: tasks,
+              onPoi: onPoi,
+              onDone: onDone,
+              paperKey: paperKey,
+            ),
+          ),
+          const SizedBox(height: 14),
           Expanded(
             child: wide
                 ? Row(
@@ -1651,6 +2304,83 @@ class _PoiPage extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _UndoneTaskPanel extends StatelessWidget {
+  const _UndoneTaskPanel({
+    required this.tasks,
+    required this.onPoi,
+    required this.onDone,
+    required this.paperKey,
+  });
+  final List<NopoiTask> tasks;
+  final ValueChanged<NopoiTask> onPoi;
+  final ValueChanged<NopoiTask> onDone;
+  final GlobalKey paperKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      title: '未完了タスク',
+      child: tasks.isEmpty
+          ? const Text(
+              'まだタスクがありません。',
+              style: TextStyle(color: Color(0xff6b7880)),
+            )
+          : ListView.separated(
+              padding: EdgeInsets.zero,
+              itemCount: tasks.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, index) {
+                final task = tasks[index];
+                return Container(
+                  key: index == 0 ? paperKey : null,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xffd8e1e5)),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              task.text,
+                              style: const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              task.notifyAt == null
+                                  ? '通知: 未設定'
+                                  : '通知: ${formatDate(task.notifyAt!)}',
+                              style: const TextStyle(
+                                color: Color(0xff6b7880),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        onPressed: () => onPoi(task),
+                        child: const Text('Poi'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: () => onDone(task),
+                        child: const Text('Done'),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
     );
   }
 }
@@ -2224,4 +2954,9 @@ class NotificationService {
 String formatDate(DateTime value) {
   String two(int n) => n.toString().padLeft(2, '0');
   return '${two(value.month)}/${two(value.day)} ${two(value.hour)}:${two(value.minute)}';
+}
+
+String formatTime(DateTime value) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(value.hour)}:${two(value.minute)}';
 }
