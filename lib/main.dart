@@ -757,7 +757,7 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 76,
+      height: 100,
       padding: const EdgeInsets.symmetric(horizontal: 18),
       decoration: BoxDecoration(
         color: const Color(0xfffffdf8).withValues(alpha: .92),
@@ -765,10 +765,9 @@ class _Header extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Text(
-            'NoPoi',
-            style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900),
-          ),
+          Image.asset('assets/images/logo.png', width: 100, height: 100
+          filterQuality: FilterQuality.high
+          isAntiAlias: true,),
           const SizedBox(width: 10),
           const Expanded(
             child: Text(

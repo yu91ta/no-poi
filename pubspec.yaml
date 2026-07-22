@@ -26,3 +26,4 @@ flutter:
   assets:
     - assets/images/room.png
     - assets/sounds/poi.mp3
+    - assets/images/logo.png
