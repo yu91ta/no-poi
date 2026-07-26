@@ -1,11 +1,13 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
@@ -67,7 +69,10 @@ class NoPoiHome extends StatefulWidget {
 }
 
 class _NoPoiHomeState extends State<NoPoiHome> {
-  static const _storageKey = 'nopoi_flutter_state_v1';
+  static const _legacyStorageKey = 'nopoi_flutter_state_v1';
+  static const _localStorageDirName = '.nopoi_local';
+  static const _localStorageFileName = 'reminder_expense.min.v1.bin';
+  static const _storageFormatVersion = 1;
   final _taskController = TextEditingController();
   final _amountController = TextEditingController();
   final _otherExpenseController = TextEditingController();
@@ -107,50 +112,115 @@ class _NoPoiHomeState extends State<NoPoiHome> {
   }
 
   Future<void> _load() async {
+    final compactData = await _readCompactStateFromFile();
+    if (compactData != null) {
+      _applyLoadedState(compactData);
+      await _recordDueSubscriptions();
+      return;
+    }
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_storageKey);
+    final raw = prefs.getString(_legacyStorageKey);
     if (raw == null) return;
     final data = jsonDecode(raw) as Map<String, dynamic>;
-    setState(() {
-      _tasks = (data['tasks'] as List? ?? [])
-          .map((e) => NopoiTask.fromJson(e))
-          .toList();
-      _poiTasks = (data['poiTasks'] as List? ?? [])
-          .map((e) => NopoiTask.fromJson(e))
-          .toList();
-      _doneTasks = (data['doneTasks'] as List? ?? [])
-          .map((e) => NopoiTask.fromJson(e))
-          .toList();
-      _expenses = (data['expenses'] as List? ?? [])
-          .map((e) => ExpenseItem.fromJson(e))
-          .toList();
-      _monthlyBudget = data['monthlyBudget'] as int? ?? 100000;
-      _subscriptions = (data['subscriptions'] as List? ?? [])
-          .map((e) => Subscription.fromJson(e))
-          .toList();
-      _doneMarkIds
-        ..clear()
-        ..addAll((data['doneMarkIds'] as List? ?? []).cast<String>());
-      _roomLitter = data['roomLitter'] as int? ?? 0;
-    });
+    _applyLoadedState(data);
+    await _save();
+    await prefs.remove(_legacyStorageKey);
     await _recordDueSubscriptions();
   }
 
+  void _applyLoadedState(Map<String, dynamic> data) {
+    final taskSource = data['t'] ?? data['tasks'] ?? const [];
+    final poiTaskSource = data['pt'] ?? data['poiTasks'] ?? const [];
+    final doneTaskSource = data['dt'] ?? data['doneTasks'] ?? const [];
+    final expenseSource = data['e'] ?? data['expenses'] ?? const [];
+    final subscriptionSource = data['s'] ?? data['subscriptions'] ?? const [];
+    final doneMarkSource = data['dm'] ?? data['doneMarkIds'] ?? const [];
+    setState(() {
+      _tasks = (taskSource as List)
+          .map((e) => NopoiTask.fromStorage(e))
+          .toList();
+      _poiTasks = (poiTaskSource as List)
+          .map((e) => NopoiTask.fromStorage(e))
+          .toList();
+      _doneTasks = (doneTaskSource as List)
+          .map((e) => NopoiTask.fromStorage(e))
+          .toList();
+      _expenses = (expenseSource as List)
+          .map((e) => ExpenseItem.fromStorage(e))
+          .toList();
+      _monthlyBudget =
+          data['b'] as int? ?? data['monthlyBudget'] as int? ?? 100000;
+      _subscriptions = (subscriptionSource as List)
+          .map((e) => Subscription.fromStorage(e))
+          .toList();
+      _doneMarkIds
+        ..clear()
+        ..addAll((doneMarkSource as List).cast<String>());
+      _roomLitter = data['rl'] as int? ?? data['roomLitter'] as int? ?? 0;
+    });
+  }
+
   Future<void> _save() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _storageKey,
-      jsonEncode({
-        'tasks': _tasks.map((e) => e.toJson()).toList(),
-        'poiTasks': _poiTasks.map((e) => e.toJson()).toList(),
-        'doneTasks': _doneTasks.map((e) => e.toJson()).toList(),
-        'expenses': _expenses.map((e) => e.toJson()).toList(),
-        'monthlyBudget': _monthlyBudget,
-        'doneMarkIds': _doneMarkIds.toList(),
-        'subscriptions': _subscriptions.map((e) => e.toJson()).toList(),
-        'roomLitter': _roomLitter,
-      }),
+    final file = await _resolveStorageFile();
+    final payload = jsonEncode({
+      'v': _storageFormatVersion,
+      't': _tasks.map((e) => e.toCompact()).toList(),
+      'pt': _poiTasks.map((e) => e.toCompact()).toList(),
+      'dt': _doneTasks.map((e) => e.toCompact()).toList(),
+      'e': _expenses.map((e) => e.toCompact()).toList(),
+      'b': _monthlyBudget,
+      'dm': _doneMarkIds.toList(),
+      's': _subscriptions.map((e) => e.toCompact()).toList(),
+      'rl': _roomLitter,
+    });
+    final compressed = gzip.encode(utf8.encode(payload));
+    await file.writeAsBytes(compressed, flush: true);
+  }
+
+  Future<Map<String, dynamic>?> _readCompactStateFromFile() async {
+    final file = await _resolveStorageFile();
+    if (!await file.exists()) return null;
+    final compressed = await file.readAsBytes();
+    final decoded = utf8.decode(gzip.decode(compressed));
+    final data = jsonDecode(decoded);
+    if (data is! Map<String, dynamic>) {
+      throw const FormatException('Invalid local storage format');
+    }
+    return data;
+  }
+
+  Future<File> _resolveStorageFile() async {
+    final preferredDir = Directory(
+      '${Directory.current.path}${Platform.pathSeparator}$_localStorageDirName',
     );
+    if (await _canWriteToDirectory(preferredDir)) {
+      return File(
+        '${preferredDir.path}${Platform.pathSeparator}$_localStorageFileName',
+      );
+    }
+
+    final appSupportDir = await getApplicationSupportDirectory();
+    final fallbackDir = Directory(
+      '${appSupportDir.path}${Platform.pathSeparator}$_localStorageDirName',
+    );
+    await fallbackDir.create(recursive: true);
+    return File(
+      '${fallbackDir.path}${Platform.pathSeparator}$_localStorageFileName',
+    );
+  }
+
+  Future<bool> _canWriteToDirectory(Directory directory) async {
+    try {
+      await directory.create(recursive: true);
+      final probeFile = File(
+        '${directory.path}${Platform.pathSeparator}.write_probe',
+      );
+      await probeFile.writeAsString('ok', flush: true);
+      await probeFile.delete();
+      return true;
+    } on FileSystemException {
+      return false;
+    }
   }
 
   // タスク入力欄にこの文字列を入力して追加すると、保存データの初期化を確認する。
@@ -233,7 +303,11 @@ class _NoPoiHomeState extends State<NoPoiHome> {
       _pendingRoomDrops.clear();
     });
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_storageKey);
+    await prefs.remove(_legacyStorageKey);
+    final file = await _resolveStorageFile();
+    if (await file.exists()) {
+      await file.delete();
+    }
     if (mounted) {
       ScaffoldMessenger.of(
         context,
@@ -765,9 +839,13 @@ class _Header extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Image.asset('assets/images/logo.png', width: 100, height: 100
-          filterQuality: FilterQuality.high
-          isAntiAlias: true,),
+          Image.asset(
+            'assets/images/logo.png',
+            width: 100,
+            height: 100,
+            filterQuality: FilterQuality.high,
+            isAntiAlias: true,
+          ),
           const SizedBox(width: 10),
           const Expanded(
             child: Text(
@@ -841,9 +919,7 @@ class _BottomNavItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected
-        ? const Color(0xff278554)
-        : const Color(0xff9aa39d);
+    final color = selected ? const Color(0xff278554) : const Color(0xff9aa39d);
     return InkWell(
       onTap: onTap,
       child: Column(
@@ -1363,7 +1439,10 @@ class _MainPageState extends State<_MainPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(
-                child: _BalanceCard(balance: balance, balanceDelta: balanceDelta),
+                child: _BalanceCard(
+                  balance: balance,
+                  balanceDelta: balanceDelta,
+                ),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -1410,9 +1489,7 @@ class _MainPageState extends State<_MainPage> {
         SizedBox(
           width: double.infinity,
           child: OutlinedButton.icon(
-             style: OutlinedButton.styleFrom(
-      backgroundColor: Colors.white,
-    ),
+            style: OutlinedButton.styleFrom(backgroundColor: Colors.white),
             onPressed: onSubscription,
             icon: const Icon(Icons.autorenew),
             label: const Text('サブスク管理'),
@@ -1887,7 +1964,10 @@ class _BalanceCard extends StatelessWidget {
         children: [
           const Row(
             children: [
-              Text('残高', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+              Text(
+                '残高',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+              ),
               SizedBox(width: 4),
               Text('🌱', style: TextStyle(fontSize: 15)),
             ],
@@ -2113,35 +2193,37 @@ class _MonthlyScheduleCard extends StatelessWidget {
               ),
             )
           else
-            ...tasks.take(3).map(
-              (task) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.radio_button_unchecked,
-                      size: 18,
-                      color: Color(0xffc9c2ac),
+            ...tasks
+                .take(3)
+                .map(
+                  (task) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.radio_button_unchecked,
+                          size: 18,
+                          color: Color(0xffc9c2ac),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            task.text,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ),
+                        Text(
+                          task.notifyAt == null ? '' : '${task.notifyAt!.day}日',
+                          style: const TextStyle(
+                            color: Color(0xff6b7880),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        task.text,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                    ),
-                    Text(
-                      task.notifyAt == null ? '' : '${task.notifyAt!.day}日',
-                      style: const TextStyle(
-                        color: Color(0xff6b7880),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
-            ),
           const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
@@ -2197,7 +2279,10 @@ class _ExpenseManageCard extends StatelessWidget {
           const SizedBox(height: 6),
           InkWell(
             onTap: onBudgetTap,
-            child: _BudgetRow(label: '今月の予算', value: '¥${_comma(monthlyBudget)}'),
+            child: _BudgetRow(
+              label: '今月の予算',
+              value: '¥${_comma(monthlyBudget)}',
+            ),
           ),
           const SizedBox(height: 10),
           SizedBox(
@@ -2938,11 +3023,7 @@ class _PoiPage extends StatelessWidget {
         children: [
           SizedBox(
             height: 320,
-            child: _UndoneTaskPanel(
-              tasks: tasks,
-              onPoi: onPoi,
-              onDone: onDone,
-            ),
+            child: _UndoneTaskPanel(tasks: tasks, onPoi: onPoi, onDone: onDone),
           ),
           const SizedBox(height: 14),
           Expanded(
@@ -3149,7 +3230,9 @@ class _UndoneTaskPanel extends StatelessWidget {
                           children: [
                             Text(
                               task.text,
-                              style: const TextStyle(fontWeight: FontWeight.w700),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                             const SizedBox(height: 4),
                             Text(
@@ -3547,6 +3630,31 @@ class NopoiTask {
     'movedAt': movedAt?.toIso8601String(),
   };
 
+  List<dynamic> toCompact() => [
+    id,
+    text,
+    createdAt.millisecondsSinceEpoch,
+    notifyAt?.millisecondsSinceEpoch,
+    movedAt?.millisecondsSinceEpoch,
+  ];
+
+  factory NopoiTask.fromStorage(dynamic raw) {
+    if (raw is List) {
+      return NopoiTask(
+        id: raw[0] as String,
+        text: raw[1] as String,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(raw[2] as int),
+        notifyAt: raw[3] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(raw[3] as int),
+        movedAt: raw[4] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(raw[4] as int),
+      );
+    }
+    return NopoiTask.fromJson(raw);
+  }
+
   factory NopoiTask.fromJson(dynamic json) {
     final data = json as Map<String, dynamic>;
     return NopoiTask(
@@ -3635,6 +3743,41 @@ class Subscription {
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
   };
+
+  List<dynamic> toCompact() => [
+    id,
+    name,
+    amount,
+    billingDay,
+    category,
+    memo,
+    notificationEnabled,
+    startMonth.millisecondsSinceEpoch,
+    isActive,
+    lastRecordedYearMonth,
+    createdAt.millisecondsSinceEpoch,
+    updatedAt.millisecondsSinceEpoch,
+  ];
+
+  factory Subscription.fromStorage(dynamic raw) {
+    if (raw is List) {
+      return Subscription(
+        id: raw[0] as String,
+        name: raw[1] as String,
+        amount: raw[2] as int,
+        billingDay: raw[3] as int,
+        category: raw[4] as String,
+        memo: raw[5] as String,
+        notificationEnabled: raw[6] as bool,
+        startMonth: DateTime.fromMillisecondsSinceEpoch(raw[7] as int),
+        isActive: raw[8] as bool,
+        lastRecordedYearMonth: raw[9] as String?,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(raw[10] as int),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(raw[11] as int),
+      );
+    }
+    return Subscription.fromJson(raw);
+  }
   factory Subscription.fromJson(dynamic json) {
     final data = json as Map<String, dynamic>;
     return Subscription(
@@ -3686,6 +3829,31 @@ class ExpenseItem {
     'sourceType': sourceType,
     'subscriptionId': subscriptionId,
   };
+
+  List<dynamic> toCompact() => [
+    id,
+    amount,
+    kind,
+    createdAt.millisecondsSinceEpoch,
+    title,
+    sourceType,
+    subscriptionId,
+  ];
+
+  factory ExpenseItem.fromStorage(dynamic raw) {
+    if (raw is List) {
+      return ExpenseItem(
+        id: raw[0] as String,
+        amount: raw[1] as int,
+        kind: raw[2] as String,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(raw[3] as int),
+        title: raw[4] as String?,
+        sourceType: raw[5] as String? ?? 'manual',
+        subscriptionId: raw[6] as String?,
+      );
+    }
+    return ExpenseItem.fromJson(raw);
+  }
 
   factory ExpenseItem.fromJson(dynamic json) {
     final data = json as Map<String, dynamic>;

@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local app data files (reminder/expense storage)
+/.nopoi_local/
